@@ -1,0 +1,3 @@
+allowBuilds:
+  # Vite uses esbuild for the production bundle; no other dependency may run install scripts.
+  esbuild: true

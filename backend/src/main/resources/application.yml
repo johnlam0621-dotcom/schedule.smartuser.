@@ -1,0 +1,111 @@
+# 后端服务端口配置：默认 8088，可通过 SERVER_PORT 环境变量覆盖。
+server:
+  port: ${SERVER_PORT:8088}
+
+spring:
+  # Spring 应用名：用于日志、监控和服务识别。
+  application:
+    name: schedule-smartuser
+  # MySQL 数据源配置：业务表、导入批次、系统用户/菜单/权限均存储在该库。
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 连接 URL 支持环境变量覆盖；默认开启 UTF-8、东八区、连接/读超时和 keepalive。
+    url: ${MYSQL_URL:jdbc:mysql://localhost:3306/schedule_smartuser?useUnicode=true&characterEncoding=UTF-8&useAffectedRows=true&useTimezone=true&serverTimezone=GMT%2B8&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=10000&socketTimeout=60000&tcpKeepAlive=true}
+    username: ${MYSQL_USERNAME:root}
+    password: "${MYSQL_PASSWORD:}"
+    # HikariCP 连接池配置：控制最大连接数、空闲连接、连接等待和泄漏检测。
+    hikari:
+      maximum-pool-size: ${MYSQL_POOL_MAX_SIZE:10}
+      minimum-idle: ${MYSQL_POOL_MIN_IDLE:2}
+      connection-timeout: ${MYSQL_POOL_CONNECTION_TIMEOUT:60000}
+      validation-timeout: ${MYSQL_POOL_VALIDATION_TIMEOUT:5000}
+      idle-timeout: ${MYSQL_POOL_IDLE_TIMEOUT:300000}
+      max-lifetime: ${MYSQL_POOL_MAX_LIFETIME:600000}
+      keepalive-time: ${MYSQL_POOL_KEEPALIVE_TIME:300000}
+      leak-detection-threshold: ${MYSQL_POOL_LEAK_DETECTION_THRESHOLD:60000}
+  # Redis 配置：优先作为登录 token 会话存储；Redis 不可用时 TokenService 会使用本地内存兜底。
+  redis:
+    type: standalone
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
+    database: ${REDIS_DATABASE:0}
+    timeout: 6000ms
+    lettuce:
+      pool:
+        max-active: 10
+        max-wait: 100ms
+        max-idle: 8
+        min-idle: 2
+      shutdown-timeout: 100ms
+  # 上传限制：检查视频单个最多 3GB；请求上限预留 multipart 元数据空间。
+  servlet:
+    multipart:
+      max-file-size: 3GB
+      max-request-size: 3100MB
+  # JSON 序列化配置：日期以字符串输出，避免前端收到时间戳后格式不一致。
+  jackson:
+    serialization:
+      WRITE_DATES_AS_TIMESTAMPS: false
+
+# 业务认证配置：token 有效期默认 8 小时，可通过 TOKEN_TTL_SECONDS 覆盖。
+schedule:
+  auth:
+    token-ttl-seconds: ${TOKEN_TTL_SECONDS:28800}
+  bootstrap:
+    admin:
+      # 仅首次修复管理员时临时设置密码；未配置时绝不会创建或重置管理员。
+      username: ${SCHEDULE_BOOTSTRAP_ADMIN_USERNAME:admin}
+      password: ${SCHEDULE_BOOTSTRAP_ADMIN_PASSWORD:}
+      real-name: ${SCHEDULE_BOOTSTRAP_ADMIN_REAL_NAME:System Admin}
+
+# 外部集成配置：Google Sheet 仅作为只读排班来源，导入结果只写入应用数据库。
+integration:
+  google-sheet:
+    # 旧版写回同步开关；当前只读导入不会向 Google Sheet 写入任何数据。
+    enabled: ${GOOGLE_SHEET_SYNC_ENABLED:false}
+    # 目标 Google Spreadsheet ID。
+    spreadsheet-id: ${GOOGLE_SHEET_SPREADSHEET_ID:}
+    # 目标 Sheet gid；未配置 sheet-name 时后端会按 gid 解析实际 sheet 名称。
+    sheet-gid: ${GOOGLE_SHEET_GID:}
+    # 可选：直接指定 Sheet 名称，指定后无需按 gid 查询。
+    sheet-name: ${GOOGLE_SHEET_NAME:}
+    # 服务账号方式：可配置 JSON 文件路径、JSON 原文或 Base64 内容，三选一即可。
+    service-account-file: ${GOOGLE_SHEET_SERVICE_ACCOUNT_FILE:}
+    service-account-json: ${GOOGLE_SHEET_SERVICE_ACCOUNT_JSON:}
+    service-account-base64: ${GOOGLE_SHEET_SERVICE_ACCOUNT_BASE64:}
+    # Apps Script Web App 方式：通过 URL + secret 只读获取 Sheet 标签和行数据。
+    web-app-url: ${GOOGLE_SHEET_WEB_APP_URL:}
+    web-app-secret: ${GOOGLE_SHEET_WEB_APP_SECRET:}
+    # Google Sheet 批处理大小和网络超时，避免一次请求过大或网络不可达时长时间阻塞。
+    batch-size: ${GOOGLE_SHEET_BATCH_SIZE:500}
+    connect-timeout-millis: ${GOOGLE_SHEET_CONNECT_TIMEOUT_MILLIS:10000}
+    read-timeout-millis: ${GOOGLE_SHEET_READ_TIMEOUT_MILLIS:60000}
+    # Admin 或 Manager 登录后在后台检查新 Week 标签；只导入从未导入过的周，避免覆盖巡检进度。
+    auto-import-on-login: ${GOOGLE_SHEET_AUTO_IMPORT_ON_LOGIN:true}
+    # 单次最多自动导入的当前/未来周数，防止误建大量 Sheet 时占用过多资源。
+    auto-import-max-weeks: ${GOOGLE_SHEET_AUTO_IMPORT_MAX_WEEKS:8}
+
+# MyBatis-Plus 配置：单表查询使用 BaseMapper/Wrapper，保留 mapper-locations 以支持后续多表 XML SQL。
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  # 数据库下划线列名自动映射 Java 驼峰字段，例如 inspection_date -> inspectionDate。
+  configuration:
+    map-underscore-to-camel-case: true
+  # 主键默认使用数据库自增策略。
+  global-config:
+    db-config:
+      id-type: auto
+
+# 日志配置：统一使用 UTF-8，避免 Windows 控制台/文件中中文日志乱码。
+logging:
+  charset:
+    console: UTF-8
+    file: UTF-8
+  level:
+    # 应用包基础日志级别。
+    com.smartuser.schedule: INFO
+    # Controller 接口执行日志切面。
+    com.smartuser.schedule.interface: INFO
+    # Service 业务执行日志切面。
+    com.smartuser.schedule.business: INFO

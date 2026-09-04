@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+    PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+    "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.smartuser.schedule.mapper.InspectionMapper">
+  <!-- Week 导入采用批量 INSERT，显著减少远程数据库网络往返。 -->
+  <insert id="insertBatch">
+    INSERT INTO schedule_inspection (
+      import_batch_id, row_num, day_of_week, status, mac_id, sales,
+      first_name, last_name, customer_name, phone_number, address, suburb,
+      city_council, inspector, inspection_date, inspection_time, projects,
+      scheduler_remarks, quotation_team_report, raw_json, created_at, updated_at
+    ) VALUES
+    <foreach collection="records" item="record" separator=",">
+      (
+        #{record.importBatchId}, #{record.rowNumber}, #{record.dayName}, #{record.status},
+        #{record.macId}, #{record.sales}, #{record.firstName}, #{record.lastName},
+        #{record.customerName}, #{record.phoneNumber}, #{record.address}, #{record.suburb},
+        #{record.cityCouncil}, #{record.inspector}, #{record.inspectionDate}, #{record.inspectionTime},
+        #{record.projects}, #{record.schedulerRemarks}, #{record.quotationTeamReport},
+        #{record.rawJson}, #{record.createdAt}, #{record.updatedAt}
+      )
+    </foreach>
+  </insert>
+</mapper>

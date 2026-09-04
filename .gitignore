@@ -1,0 +1,62 @@
+# IDE 配置
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# 编译输出
+target/
+out/
+build/
+bin/
+frontend/dist/
+
+# 日志文件
+*.log
+logs/
+uploads/
+exports/
+release/
+
+# 依赖目录
+node_modules/
+vendor/
+.pnpm-store/
+.tools/
+.agents/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 其他
+.env.local
+frontend/.env.local
+*.class
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# 本地数据、客户排期与服务器连接记录
+*.csv
+*.xlsx
+*.xls
+*.sql
+!database/schema.sql
+/aliyun_known_hosts
+/product+inspector-0717.txt
+
+# 历史构建/部署快照（源代码位于 frontend 和 backend）
+/schedule-*/
+/deploy-mobile-nav-patch/
+
+# 本地密钥/环境变量文件（示例文件可提交，真实值不要提交）
+.env
+*.local.ps1
+scripts/*-env.ps1
+!scripts/*-env.example.ps1
