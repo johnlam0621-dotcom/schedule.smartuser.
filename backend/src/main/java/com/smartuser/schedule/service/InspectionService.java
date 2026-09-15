@@ -1803,16 +1803,18 @@ public class InspectionService {
 
   private void ensureBookSlotAvailable(LocalDate date, String inspector, String time,
                                         int durationMinutes, Long excludedId) {
-    List<InspectionRecord> records = inspectionMapper.selectList(new LambdaQueryWrapper<InspectionRecord>()
-        .eq(InspectionRecord::getInspectionDate, date)
-        .eq(InspectionRecord::getInspector, inspector)
-        .ne(excludedId != null, InspectionRecord::getId, excludedId)
-        .and(item -> item.isNull(InspectionRecord::getStatus)
-            .or().notIn(InspectionRecord::getStatus,
-                Arrays.asList("Cancelled", "Reschedule", "Rescheduled", "Open Slot"))));
+    // Use the same trim/case-insensitive inspector identity as route calculation.
+    // Exact SQL equality could miss imported names with trailing spaces and allow
+    // a conflicting booking or disagree with the final travel validation.
+    List<InspectionRecord> records = activeRecordsByDate(date);
     int requestedStart = minutesOf(time);
     List<BusySlot> existingSlots = new ArrayList<BusySlot>();
     for (InspectionRecord record : records) {
+      if (record == null || (excludedId != null && excludedId.equals(record.getId()))
+          || "Open Slot".equalsIgnoreCase(trim(record.getStatus()))
+          || !trim(inspector).equalsIgnoreCase(trim(record.getInspector()))) {
+        continue;
+      }
       int existingStart = minutesOf(record.getInspectionTime());
       if (existingStart >= 0) {
         existingSlots.add(new BusySlot(existingStart, appointmentDuration(record)));

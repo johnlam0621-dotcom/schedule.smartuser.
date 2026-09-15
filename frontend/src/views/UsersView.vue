@@ -10,6 +10,7 @@
           <select v-model="form.roleCode">
             <option value="admin">admin</option>
             <option value="manager">manager</option>
+            <option value="quotation">Quotation Team</option>
             <option value="scheduler">scheduler</option>
             <option value="sales">sales</option>
             <option value="inspector">inspector</option>

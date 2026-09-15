@@ -88,6 +88,7 @@
               <p v-if="file.remark && remarkEditor.fileId !== file.id" class="media-remark"><strong>Remark:</strong> {{ file.remark }}</p>
               <div class="media-actions">
                 <button type="button" @click="openMedia(file, slot, job)">Play</button>
+                <a class="video-download" :href="downloadUrl(file)" download>Download</a>
                 <button type="button" @click="openRemarkEditor(file)">Remark</button>
                 <button type="button" class="danger" :disabled="deleting[file.id]" @click="deleteMedia(job, slot, file)">{{ deleting[file.id] ? 'Deleting…' : 'Delete' }}</button>
               </div>
@@ -105,12 +106,14 @@
     <div v-if="activeMedia" class="media-modal" role="dialog" aria-modal="true" @click.self="closeMedia">
       <div class="modal-panel">
         <button type="button" class="modal-close" aria-label="Close preview" @click="closeMedia">×</button>
-        <div v-if="activeMedia.group === 'video' && mediaLoading" class="modal-loading">Loading video…</div>
-        <video v-else-if="activeMedia.group === 'video'" :src="previews[activeMedia.file.id]" controls autoplay></video>
+        <div v-if="activeMedia.group === 'video' && activeMedia.preparing" class="video-preparing">{{ activeMedia.status }}</div>
+        <video v-else-if="activeMedia.group === 'video' && activeMedia.playbackUrl" :src="activeMedia.playbackUrl" controls autoplay preload="metadata" @error="mediaPlaybackFailed"></video>
         <img v-else :src="previews[activeMedia.file.id]" :alt="activeMedia.label" />
         <div class="modal-caption">
           <strong>{{ activeMedia.label }}</strong>
           <span>{{ activeMedia.customer }} · {{ activeMedia.file.name }}</span>
+          <a v-if="activeMedia.group === 'video' && activeMedia.playbackUrl" class="video-download modal-download" :href="`${activeMedia.playbackUrl}?download=true`" download>Download smaller video</a>
+          <a v-if="activeMedia.group === 'video'" class="video-download modal-download" :href="downloadUrl(activeMedia.file)" download>Download original</a>
         </div>
       </div>
     </div>
@@ -154,6 +157,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import http from '../api/http'
 import { authState } from '../store/auth'
+import { originalVideoDownloadUrl, prepareVideoPlayback } from '../utils/videoPlayback'
 
 const selectedDate = ref(localDateText(new Date()))
 const selectedInspector = ref('')
@@ -164,7 +168,6 @@ const data = reactive({ inspectors: [], availableDates: [], jobs: [], jobCount: 
 const previews = reactive({})
 const deleting = reactive({})
 const activeMedia = ref(null)
-const mediaLoading = ref(false)
 const remarkEditor = reactive({ fileId: null, value: '', saving: false })
 const annotationCanvas = ref(null)
 const annotationActions = ref([])
@@ -237,22 +240,35 @@ function mediaSlotLabel(slot) {
   return slot.label
 }
 async function openMedia(file, slot, job) {
-  activeMedia.value = { file, label: mediaSlotLabel(slot), group: slot.group, customer: job.customerName || 'Unnamed customer' }
-  if (slot.group === 'video' && !previews[file.id]) {
-    mediaLoading.value = true
-    try {
-      const response = await fetch(file.url, { headers: { Authorization: `Bearer ${authState.token}` } })
-      if (!response.ok) throw new Error('Video could not be loaded.')
-      previews[file.id] = URL.createObjectURL(await response.blob())
-    } catch (requestError) {
-      error.value = requestError.message || 'Video could not be loaded.'
-      activeMedia.value = null
-    } finally {
-      mediaLoading.value = false
-    }
+  const isVideo = slot.group === 'video'
+  activeMedia.value = {
+    file,
+    label: mediaSlotLabel(slot),
+    group: slot.group,
+    customer: job.customerName || 'Unnamed customer',
+    preparing: isVideo,
+    status: isVideo ? 'Preparing video…' : '',
+    playbackUrl: ''
+  }
+  if (slot.group !== 'video') return
+  try {
+    const playbackUrl = await prepareVideoPlayback(file, (status) => {
+      if (activeMedia.value?.file.id === file.id) activeMedia.value.status = status
+    })
+    if (activeMedia.value?.file.id === file.id) activeMedia.value.playbackUrl = playbackUrl
+  } catch (requestError) {
+    error.value = requestError.message || 'The video could not be prepared.'
+  } finally {
+    if (activeMedia.value?.file.id === file.id) activeMedia.value.preparing = false
   }
 }
 function closeMedia() { activeMedia.value = null }
+function downloadUrl(file) {
+  return originalVideoDownloadUrl(file)
+}
+function mediaPlaybackFailed() {
+  error.value = 'This video format cannot be played in the browser. Use Download video to save the original file.'
+}
 
 function openRemarkEditor(file) {
   if (remarkEditor.fileId === file.id) return closeRemarkEditor()
@@ -517,6 +533,7 @@ button:disabled { opacity: .55; cursor: default; }
 .file-card small { color: #64748b; overflow-wrap: anywhere; }
 .media-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 3px; }
 .media-actions button { width: auto; min-height: 34px; padding: 5px 9px; font-size: 12px; }
+.video-download { display: inline-flex; align-items: center; justify-content: center; width: auto; min-height: 34px; padding: 5px 9px; border: 1px solid #8fbde9; border-radius: 5px; background: #edf6ff; color: #075da8; font-size: 12px; font-weight: 700; text-decoration: none; }
 .media-actions .danger { border-color: #efb0aa; background: #fff3f2; color: #b42318; }
 .media-remark { margin: 2px 0; padding: 7px 8px; border-left: 3px solid #55a083; border-radius: 4px; background: #effaf6; color: #244e40; font-size: 12px; overflow-wrap: anywhere; }
 .remark-editor { display: grid; gap: 7px; padding: 8px; border: 1px solid #86b7a6; border-radius: 7px; background: #f6fcf9; }
@@ -532,6 +549,7 @@ button.secondary { border-color: #cbd8e8; background: #f5f7fa; color: #334155; }
 .modal-panel > img, .modal-panel > video { max-width: 100%; max-height: 78vh; object-fit: contain; background: #0b1220; }
 .modal-close { position: absolute; top: -14px; right: -14px; z-index: 1; width: 42px; min-height: 42px; padding: 0; border-radius: 50%; font-size: 28px; }
 .modal-caption { display: grid; gap: 3px; padding-top: 10px; }.modal-caption span { color: #64748b; }
+.modal-download { justify-self: start; margin-top: 6px; }
 .modal-loading { display: grid; place-items: center; min-width: min(800px, 85vw); min-height: 320px; background: #0b1220; color: #fff; font-size: 18px; }
 @media (max-width: 700px) {
   .review-page { padding: 10px; }.review-filters, .review-summary { grid-template-columns: 1fr; }

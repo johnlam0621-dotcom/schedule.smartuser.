@@ -176,7 +176,8 @@ CREATE TABLE IF NOT EXISTS inspection_photo (
 -- 插入角色数据
 INSERT INTO sys_role(code, name, description) VALUES
 ('admin', 'Administrator', 'Full system access'),
-('manager', 'Manager', 'Full system page access'),
+('manager', 'Manager', 'System access excluding inspection confirmation'),
+('quotation', 'Quotation Team', 'Inspector Photos and Inspection Done access'),
 ('scheduler', 'Scheduler', 'Search, Book and personal Inspector workspace'),
 ('sales', 'Sales', 'Search and Book access only'),
 ('inspector', 'Inspector', 'Mobile route and shift workspace'),

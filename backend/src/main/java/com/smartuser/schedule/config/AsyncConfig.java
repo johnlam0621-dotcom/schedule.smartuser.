@@ -19,4 +19,16 @@ public class AsyncConfig {
     executor.initialize();
     return executor;
   }
+
+  /** Bounded workers for HTTP photo/video streaming so slow clients cannot create unlimited threads. */
+  @Bean(name = "mediaStreamingExecutor")
+  public ThreadPoolTaskExecutor mediaStreamingExecutor() {
+    ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+    executor.setCorePoolSize(4);
+    executor.setMaxPoolSize(16);
+    executor.setQueueCapacity(100);
+    executor.setThreadNamePrefix("media-stream-");
+    executor.initialize();
+    return executor;
+  }
 }

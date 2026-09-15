@@ -9,6 +9,8 @@ import org.springframework.web.servlet.HandlerInterceptor;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.Cookie;
+import org.springframework.http.ResponseCookie;
 
 /**
  * 登录鉴权拦截器。
@@ -21,6 +23,7 @@ import javax.servlet.http.HttpServletResponse;
 @Component
 public class AuthInterceptor implements HandlerInterceptor {
   public static final String CURRENT_USER_ATTRIBUTE = "currentUser";
+  public static final String MEDIA_SESSION_COOKIE = "schedule_media_session";
 
   private final TokenService tokenService;
   private final ObjectMapper objectMapper;
@@ -48,6 +51,11 @@ public class AuthInterceptor implements HandlerInterceptor {
     if (authorization != null && authorization.startsWith("Bearer ")) {
       token = authorization.substring("Bearer ".length()).trim();
     }
+    // Native video requests cannot add an Authorization header. Only allow the
+    // cookie fallback for read-only inspection-media requests.
+    if (token.isBlank() && isInspectionMediaRead(request.getMethod(), path)) {
+      token = cookieValue(request, MEDIA_SESSION_COOKIE);
+    }
     CurrentUser currentUser = tokenService.findUser(token);
     if (currentUser == null) {
       // 未登录统一返回 401 和 ApiResponse JSON，前端拦截器会跳转登录页。
@@ -66,15 +74,42 @@ public class AuthInterceptor implements HandlerInterceptor {
     }
     // 将当前用户保存到 request，后续 Controller 可以直接读取。
     request.setAttribute(CURRENT_USER_ATTRIBUTE, currentUser);
+    if (authorization != null && authorization.startsWith("Bearer ")) {
+      response.addHeader("Set-Cookie", ResponseCookie.from(MEDIA_SESSION_COOKIE, token)
+          .httpOnly(true)
+          .secure(request.isSecure())
+          .sameSite("Strict")
+          .path("/api/inspector/photos")
+          .maxAge(28800)
+          .build().toString());
+    }
     return true;
+  }
+
+  private boolean isInspectionMediaRead(String method, String path) {
+    return "GET".equalsIgnoreCase(method)
+        && path.matches("/api/inspector/photos/\\d+(?:/playback(?:/status)?)?");
+  }
+
+  private String cookieValue(HttpServletRequest request, String name) {
+    Cookie[] cookies = request.getCookies();
+    if (cookies == null) return "";
+    for (Cookie cookie : cookies) {
+      if (name.equals(cookie.getName())) return cookie.getValue();
+    }
+    return "";
   }
 
   private boolean roleCanAccess(CurrentUser currentUser, String method, String path) {
     String roleCode = currentUser == null || currentUser.getRoleCode() == null
         ? ""
         : currentUser.getRoleCode().trim().toLowerCase();
-    if ("admin".equals(roleCode) || "manager".equals(roleCode)) {
+    if ("admin".equals(roleCode)) {
       return true;
+    }
+    if ("manager".equals(roleCode)) {
+      return !path.startsWith("/api/inspector/weekly-confirmations")
+          && !path.startsWith("/api/inspector/inspection-done/");
     }
     if (path.startsWith("/api/auth/")) {
       return true;
@@ -85,6 +120,9 @@ public class AuthInterceptor implements HandlerInterceptor {
     if ("sales".equals(roleCode)) {
       return !path.startsWith("/api/inspector/") && schedulerCanAccess(method, path);
     }
+    if ("quotation".equals(roleCode)) {
+      return quotationCanAccess(method, path);
+    }
     if ("viewer".equals(roleCode)) {
       return viewerCanAccess(method, path);
     }
@@ -92,6 +130,27 @@ public class AuthInterceptor implements HandlerInterceptor {
       return path.startsWith("/api/inspector/");
     }
     return false;
+  }
+
+  private boolean quotationCanAccess(String method, String path) {
+    if ("GET".equalsIgnoreCase(method)
+        && ("/api/inspector/photo-review".equals(path)
+        || "/api/inspector/weekly-confirmations".equals(path)
+        || "/api/inspector/inspection-done/search".equals(path)
+        || path.matches("/api/inspector/photos/\\d+(?:/playback(?:/status)?)?"))) {
+      return true;
+    }
+    if ("PUT".equalsIgnoreCase(method)
+        && (path.matches("/api/inspector/weekly-confirmations/\\d+")
+        || path.matches("/api/inspector/photos/\\d+/remark"))) {
+      return true;
+    }
+    if ("POST".equalsIgnoreCase(method)
+        && (path.matches("/api/inspector/route/\\d+/photos(?:/chunk|/complete)?")
+        || path.matches("/api/inspector/photos/\\d+/playback/prepare"))) {
+      return true;
+    }
+    return "DELETE".equalsIgnoreCase(method) && path.matches("/api/inspector/photos/\\d+");
   }
 
   private boolean schedulerCanAccess(String method, String path) {

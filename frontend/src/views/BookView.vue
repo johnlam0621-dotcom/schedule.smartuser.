@@ -570,6 +570,14 @@ function inspectorMatchesArea(inspectorArea, selectedArea) {
   return area === selected
 }
 
+function normalizedInspectorName(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function sameInspectionDate(left, right) {
+  return String(left || '').slice(0, 10) === String(right || '').slice(0, 10)
+}
+
 async function findSlots(showResultStatus = true) {
   errorMessage.value = ''
   statusMessage.value = ''
@@ -1054,7 +1062,8 @@ function addRouteContext(items, appointments) {
     const candidateStart = timeToMinutes(slot.start)
     const candidateEnd = candidateStart + Number(slot.durationMinutes || inspectorWorkMinutes.value || 60)
     const routeStops = appointments
-      .filter((item) => item.inspector === slot.inspector && item.address && item.inspectionDate === slot.date)
+      .filter((item) => normalizedInspectorName(item.inspector) === normalizedInspectorName(slot.inspector)
+        && item.address && sameInspectionDate(item.inspectionDate, slot.date))
       .map((item) => {
         const start = timeToMinutes(item.inspectionTime)
         const savedDuration = Number(item.workDurationMinutes)
@@ -1131,34 +1140,48 @@ async function requestRouteMatrix(origins, destinations) {
     window.google.maps.importLibrary('routes'),
     window.google.maps.importLibrary('core')
   ])
-  const { matrix } = await RouteMatrix.computeRouteMatrix({
-      origins,
-      destinations,
-      travelMode: 'DRIVING',
-      units: UnitSystem.METRIC,
-      fields: ['durationMillis', 'distanceMeters', 'condition']
-  })
-  return {
-    rows: matrix.rows.map((row) => ({
-      elements: row.items.map((item) => {
-        const durationMillis = Number(item.durationMillis)
-        const distanceMeters = Number(item.distanceMeters || 0)
-        const available = Number.isFinite(durationMillis) && durationMillis > 0
-        const seconds = available ? durationMillis / 1000 : 0
-        return {
-          status: available ? 'OK' : item.condition,
-          duration: available ? {
-            value: seconds,
-            text: `${Math.max(1, Math.round(seconds / 60))} min`
-          } : null,
-          distance: available ? {
-            value: distanceMeters,
-            text: `${(distanceMeters / 1000).toFixed(1)} km`
-          } : null
-        }
-      })
-    }))
+  // Google limits the number of origin/destination combinations in one matrix.
+  // Split large five-day searches into bounded matrices and put the results back
+  // into their original positions so one oversized request cannot hide all slots.
+  const batchSize = 20
+  const rows = origins.map(() => ({ elements: Array(destinations.length) }))
+  const requests = []
+  for (let originStart = 0; originStart < origins.length; originStart += batchSize) {
+    for (let destinationStart = 0; destinationStart < destinations.length; destinationStart += batchSize) {
+      const originBatch = origins.slice(originStart, originStart + batchSize)
+      const destinationBatch = destinations.slice(destinationStart, destinationStart + batchSize)
+      requests.push((async () => {
+        const { matrix } = await RouteMatrix.computeRouteMatrix({
+          origins: originBatch,
+          destinations: destinationBatch,
+          travelMode: 'DRIVING',
+          units: UnitSystem.METRIC,
+          fields: ['durationMillis', 'distanceMeters', 'condition']
+        })
+        matrix.rows.forEach((row, localOriginIndex) => {
+          row.items.forEach((item, localDestinationIndex) => {
+            const durationMillis = Number(item.durationMillis)
+            const distanceMeters = Number(item.distanceMeters || 0)
+            const available = Number.isFinite(durationMillis) && durationMillis >= 0
+            const seconds = available ? durationMillis / 1000 : 0
+            rows[originStart + localOriginIndex].elements[destinationStart + localDestinationIndex] = {
+              status: available ? 'OK' : item.condition,
+              duration: available ? {
+                value: seconds,
+                text: `${Math.max(1, Math.round(seconds / 60))} min`
+              } : null,
+              distance: available ? {
+                value: distanceMeters,
+                text: `${(distanceMeters / 1000).toFixed(1)} km`
+              } : null
+            }
+          })
+        })
+      })())
+    }
   }
+  await Promise.all(requests)
+  return { rows }
 }
 
 function googleDirectionsUrl(origin, waypoint, destination) {

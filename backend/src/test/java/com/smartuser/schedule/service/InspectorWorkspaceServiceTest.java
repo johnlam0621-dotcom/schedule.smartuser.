@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.mock.web.MockMultipartFile;
 
 import java.nio.file.Path;
 import java.nio.file.Files;
@@ -30,6 +31,32 @@ import org.mockito.ArgumentCaptor;
 class InspectorWorkspaceServiceTest {
 
   @Test
+  void chunkedVideoUploadRetriesAndAssemblesWithoutReuploadingTheWholeFile(@TempDir Path uploadDir) throws Exception {
+    JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
+    when(jdbcTemplate.queryForObject(org.mockito.ArgumentMatchers.contains("COUNT(*)"), eq(Integer.class), eq(88L)))
+        .thenReturn(1);
+    when(jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class)).thenReturn(501L);
+    InspectorWorkspaceService service = new InspectorWorkspaceService(jdbcTemplate, uploadDir.toString());
+    CurrentUser admin = new CurrentUser();
+    admin.setId(1L);
+    admin.setRoleCode("admin");
+    String uploadId = "12345678-1234-4234-8234-123456789012";
+
+    service.uploadChunk(admin, 88L, "inspection_video_1", uploadId, 0, 2,
+        new MockMultipartFile("file", "part0", "application/octet-stream", "hello ".getBytes()));
+    service.uploadChunk(admin, 88L, "inspection_video_1", uploadId, 1, 2,
+        new MockMultipartFile("file", "part1", "application/octet-stream", "video".getBytes()));
+    Map<String, Object> result = service.completeChunkUpload(admin, 88L, "inspection_video_1", uploadId,
+        2, 11L, "walkthrough.mp4", "video/mp4");
+
+    assertThat(result.get("id")).isEqualTo(501L);
+    Path stored = Files.list(uploadDir.resolve("88"))
+        .filter(Files::isRegularFile).findFirst().orElseThrow();
+    assertThat(Files.readString(stored)).isEqualTo("hello video");
+    assertThat(uploadDir.resolve(".chunks/88/" + uploadId)).doesNotExist();
+  }
+
+  @Test
   void photoReviewRejectsSchedulerAccounts(@TempDir Path uploadDir) {
     JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
     InspectorWorkspaceService service = new InspectorWorkspaceService(jdbcTemplate, uploadDir.toString());
@@ -39,7 +66,7 @@ class InspectorWorkspaceServiceTest {
 
     assertThatThrownBy(() -> service.photoReview(scheduler, "Dylan", LocalDate.of(2026, 8, 21)))
         .isInstanceOf(BadRequestException.class)
-        .hasMessageContaining("Manager access");
+        .hasMessageContaining("Photo reviewer access");
     verify(jdbcTemplate, never()).queryForList(anyString(), eq(String.class));
   }
 
@@ -52,11 +79,24 @@ class InspectorWorkspaceServiceTest {
 
     assertThatThrownBy(() -> service.weeklyConfirmations(inspector, LocalDate.of(2026, 9, 2)))
         .isInstanceOf(BadRequestException.class)
-        .hasMessageContaining("Manager access");
+        .hasMessageContaining("Confirmation reviewer access");
   }
 
   @Test
-  void managerCanConfirmCompletedInspection(@TempDir Path uploadDir) {
+  void inspectionDoneSearchRequiresMacIdOrPhone(@TempDir Path uploadDir) {
+    JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
+    InspectorWorkspaceService service = new InspectorWorkspaceService(jdbcTemplate, uploadDir.toString());
+    CurrentUser quotation = new CurrentUser();
+    quotation.setRoleCode("quotation");
+
+    assertThatThrownBy(() -> service.inspectionDoneSearch(quotation, "  ", "- ( )"))
+        .isInstanceOf(BadRequestException.class)
+        .hasMessageContaining("MACID or phone");
+    verify(jdbcTemplate, never()).queryForList(anyString(), any(Object[].class));
+  }
+
+  @Test
+  void quotationTeamCanConfirmCompletedInspection(@TempDir Path uploadDir) {
     JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
     when(jdbcTemplate.queryForList(org.mockito.ArgumentMatchers.contains("SELECT field_status"), eq(88L)))
         .thenReturn(List.of(Map.of("field_status", "done")));
@@ -64,13 +104,26 @@ class InspectorWorkspaceServiceTest {
         .thenReturn(1);
     InspectorWorkspaceService service = new InspectorWorkspaceService(jdbcTemplate, uploadDir.toString());
     CurrentUser manager = new CurrentUser();
-    manager.setRoleCode("manager");
+    manager.setRoleCode("quotation");
     manager.setRealName("Conan Manager");
 
     service.confirmInspection(manager, 88L, true);
 
     verify(jdbcTemplate).update(org.mockito.ArgumentMatchers.contains("manager_confirmed = 1"),
         eq("Conan Manager"), eq(88L));
+  }
+
+  @Test
+  void managerCannotConfirmInspection(@TempDir Path uploadDir) {
+    JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
+    InspectorWorkspaceService service = new InspectorWorkspaceService(jdbcTemplate, uploadDir.toString());
+    CurrentUser manager = new CurrentUser();
+    manager.setRoleCode("manager");
+
+    assertThatThrownBy(() -> service.confirmInspection(manager, 88L, true))
+        .isInstanceOf(BadRequestException.class)
+        .hasMessageContaining("Confirmation reviewer access");
+    verify(jdbcTemplate, never()).queryForList(anyString(), eq(88L));
   }
 
   @Test
@@ -151,7 +204,43 @@ class InspectorWorkspaceServiceTest {
   }
 
   @Test
-  void batteryJobRequiresLocationFloorPlanAndVideo(@TempDir Path uploadDir) {
+  void macJobRequiresAllNineInspectionPhotos(@TempDir Path uploadDir) {
+    JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
+    when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any())).thenReturn(1);
+    when(jdbcTemplate.queryForObject(org.mockito.ArgumentMatchers.contains("projects"), eq(String.class), eq(88L)))
+        .thenReturn("MAC");
+    when(jdbcTemplate.queryForList(anyString(), eq(String.class), eq(88L))).thenReturn(List.of(
+        "switchboard", "switchboard_main_switch", "ducted_gas_vents", "premises_roof",
+        "indoor_location_1", "indoor_location_2", "indoor_location_3", "indoor_location_4"));
+    InspectorWorkspaceService service = new InspectorWorkspaceService(jdbcTemplate, uploadDir.toString());
+    CurrentUser inspector = new CurrentUser();
+    inspector.setRealName("Dylan");
+
+    assertThatThrownBy(() -> service.updateStatus(inspector, 88L, "done", null))
+        .isInstanceOf(BadRequestException.class)
+        .hasMessageContaining("Condenser Outdoor Location");
+  }
+
+  @Test
+  void dacJobRequiresAllNineInspectionPhotos(@TempDir Path uploadDir) {
+    JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
+    when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any())).thenReturn(1);
+    when(jdbcTemplate.queryForObject(org.mockito.ArgumentMatchers.contains("projects"), eq(String.class), eq(88L)))
+        .thenReturn("DAC");
+    when(jdbcTemplate.queryForList(anyString(), eq(String.class), eq(88L))).thenReturn(List.of(
+        "switchboard", "switchboard_main_switch", "ducted_gas_vents", "premises_roof",
+        "indoor_location_1", "indoor_location_2", "indoor_location_3", "indoor_location_4"));
+    InspectorWorkspaceService service = new InspectorWorkspaceService(jdbcTemplate, uploadDir.toString());
+    CurrentUser inspector = new CurrentUser();
+    inspector.setRealName("Dylan");
+
+    assertThatThrownBy(() -> service.updateStatus(inspector, 88L, "done", null))
+        .isInstanceOf(BadRequestException.class)
+        .hasMessageContaining("Condenser Outdoor Location");
+  }
+
+  @Test
+  void batteryJobRequiresSwitchboardAndEitherLocation(@TempDir Path uploadDir) {
     JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
     when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any())).thenReturn(1);
     when(jdbcTemplate.queryForObject(org.mockito.ArgumentMatchers.contains("projects"), eq(String.class), eq(88L)))
@@ -164,9 +253,7 @@ class InspectorWorkspaceServiceTest {
 
     assertThatThrownBy(() -> service.updateStatus(inspector, 88L, "done", null))
         .isInstanceOf(BadRequestException.class)
-        .hasMessageContaining("Floor Plan")
-        .hasMessageContaining("Measurements")
-        .hasMessageContaining("Indoor / Outdoor Area Video")
+        .hasMessageContaining("Switchboard photo")
         .hasMessageNotContaining("Battery location photo");
   }
 
@@ -177,8 +264,7 @@ class InspectorWorkspaceServiceTest {
     when(jdbcTemplate.queryForObject(org.mockito.ArgumentMatchers.contains("projects"), eq(String.class), eq(88L)))
         .thenReturn("Battery");
     when(jdbcTemplate.queryForList(anyString(), eq(String.class), eq(88L))).thenReturn(List.of(
-        "battery_serial_label", "drawn_floor_plan_measurements", "battery_measurements",
-        "battery_indoor_outdoor_video"));
+        "battery_unit", "battery_serial_label"));
     InspectorWorkspaceService service = new InspectorWorkspaceService(jdbcTemplate, uploadDir.toString());
     CurrentUser inspector = new CurrentUser();
     inspector.setRealName("Dylan");

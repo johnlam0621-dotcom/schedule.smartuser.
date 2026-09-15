@@ -4,26 +4,33 @@ Schedule SmartUser is an inspection scheduling and field-work application built 
 
 ## Main features
 
-- Role-based access for administrators, managers, schedulers, sales users, and inspectors
+- Role-based access for administrators, managers, schedulers, sales users, inspectors, and the quotation team
 - Inspection schedule import and automatic Google Sheet week import
 - Booking recommendations with location, inspector availability, and travel-time checks
 - Inspector route map, customer details, notes, completion, and unavailable status
 - Product-specific inspection media requirements for air conditioning, solar/battery, and heat pump jobs
 - Mobile camera/file selection, photo compression, drawing, remarks, and deletion
-- Manager/admin photo and video review and weekly inspection confirmation
-- Up to four inspection videos, with a maximum of 3 GB per video
+- Inspection Done search by MACID or phone number, with photo and video review
+- MAC and DAC photo requirements, including dedicated floor plan and measurements uploads
+- Up to nine inspection video slots for DAC and four for other products, with a maximum of 3 GB per video
 
 ## Background video uploads
 
 When an inspector selects or records a video, the upload is added to a shared queue instead of blocking the inspection page.
 
-1. The video starts automatically and uploads sequentially to avoid several large files competing for the same mobile connection.
-2. A fixed **Background video uploads** panel shows waiting, progress, completion, and failure states.
-3. The inspector can navigate to other pages inside SmartUser while the upload continues.
-4. A failed upload remains in the panel and can be retried.
-5. The browser warns the inspector if they try to close or reload while an upload is active.
+1. Photos and videos use independent upload queues: two photos and one video can upload concurrently.
+2. The inspector can continue selecting photos while a video uploads.
+3. Uploads continue when navigating between pages inside SmartUser.
+4. Completed queue entries clear automatically; the large floating upload panel has been removed.
+5. The browser warns before closing or reloading while an upload is active.
 
-Web browsers cannot reliably continue a multi-gigabyte HTTP upload after the browser is fully closed. Inspectors may leave the upload page and use other SmartUser pages, but must keep the browser open until the panel says **Uploaded**. True closed-browser uploads would require a native mobile application or a resumable object-storage upload service.
+Keep the browser open until uploads finish. Uploads cannot reliably continue after the browser is fully closed.
+
+## Video playback
+
+The server prepares an H.264/AAC MP4 copy after upload using FFmpeg. Configure the FFmpeg executable for the deployment environment. Playback and downloads use authenticated byte-range streaming, allowing browsers to request portions of a video. The original upload remains available for download.
+
+The September 2026 playback fix uses explicit `StreamingResponseBody` endpoint types and a bounded streaming executor. Regression tests exercise the MVC playback route and verify HTTP 206 headers and the returned bytes.
 
 ## Project structure
 

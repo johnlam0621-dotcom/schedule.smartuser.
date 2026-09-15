@@ -37,38 +37,6 @@
       <RouterView />
     </section>
 
-    <aside v-if="uploadQueueState.items.length" class="background-upload-panel" aria-live="polite">
-      <header>
-        <div>
-          <strong>Background video uploads</strong>
-          <span v-if="activeUploadCount">{{ activeUploadCount }} active · keep SmartUser open</span>
-          <span v-else>All uploads finished</span>
-        </div>
-      </header>
-      <div class="background-upload-list">
-        <article v-for="item in uploadQueueState.items" :key="item.id" :class="`is-${item.status}`">
-          <div class="background-upload-name">
-            <strong :title="item.name">{{ item.name }}</strong>
-            <span>{{ item.description }} · {{ formatUploadSize(item.size) }}</span>
-          </div>
-          <div v-if="item.status === 'queued'" class="background-upload-status">Waiting…</div>
-          <div v-else-if="item.status === 'uploading'" class="background-upload-progress">
-            <div><span :style="{ width: `${item.progress}%` }"></span></div>
-            <strong>{{ item.progress }}%</strong>
-          </div>
-          <div v-else-if="item.status === 'complete'" class="background-upload-result success">
-            <span>Uploaded</span>
-            <button type="button" @click="dismissBackgroundUpload(item.id)">Dismiss</button>
-          </div>
-          <div v-else class="background-upload-result failed">
-            <span :title="item.error">Upload failed</span>
-            <button type="button" @click="retryBackgroundUpload(item.id)">Retry</button>
-            <button type="button" @click="dismissBackgroundUpload(item.id)">Dismiss</button>
-          </div>
-        </article>
-      </div>
-      <p v-if="activeUploadCount">You can use other SmartUser pages. Do not close the browser until every upload says Uploaded.</p>
-    </aside>
   </div>
 </template>
 
@@ -77,12 +45,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import http from '../api/http'
 import { authState, clearSession } from '../store/auth'
-import {
-  activeUploadCount,
-  dismissBackgroundUpload,
-  retryBackgroundUpload,
-  uploadQueueState
-} from '../store/uploadQueue'
+import { activeUploadCount } from '../store/uploadQueue'
 
 const route = useRoute()
 const router = useRouter()
@@ -101,7 +64,7 @@ const fallbackMenus = [
   { name: 'Routes map', path: '/routes/map', visible: 1 },
   { name: 'Book', path: '/routes/book', permissionCode: 'route:book', visible: 1 },
   { name: 'Inspector Photos', path: '/inspector/photos', visible: 1 },
-  { name: 'Confirm Inspection', path: '/inspections/confirm', visible: 1 }
+  { name: 'Inspection Done', path: '/inspections/confirm', visible: 1 }
 ]
 
 const visibleMenus = computed(() => {
@@ -126,7 +89,7 @@ const visibleMenus = computed(() => {
     menus.push({ name: 'Inspector Photos', path: '/inspector/photos', visible: 1 })
   }
   if (!menus.some((menu) => menu.path === '/inspections/confirm')) {
-    menus.push({ name: 'Confirm Inspection', path: '/inspections/confirm', visible: 1 })
+    menus.push({ name: 'Inspection Done', path: '/inspections/confirm', visible: 1 })
   }
   const permissions = new Set(authState.permissions || [])
   const permittedMenus = menus.filter((menu) => menu.visible !== 0 && (
@@ -142,11 +105,14 @@ const visibleMenus = computed(() => {
       : ['/inspections/search', '/routes/book']
     return permittedMenus.filter((menu) => allowed.includes(menu.path))
   }
+  if (authState.user?.roleCode === 'quotation') {
+    return permittedMenus.filter((menu) => ['/inspector/photos', '/inspections/confirm'].includes(menu.path))
+  }
   if (!['admin', 'manager'].includes(authState.user?.roleCode)) {
     return permittedMenus.filter((menu) => !['/inspector/photos', '/inspections/confirm', '/system/menus', '/system/permissions'].includes(menu.path))
   }
   if (authState.user?.roleCode !== 'admin') {
-    return permittedMenus.filter((menu) => !['/system/menus', '/system/permissions'].includes(menu.path))
+    return permittedMenus.filter((menu) => !['/inspections/confirm', '/system/menus', '/system/permissions'].includes(menu.path))
   }
   return permittedMenus
 })
@@ -196,12 +162,6 @@ function toggleSidebar() {
 
 function closeMobileMenu() {
   mobileMenuOpen.value = false
-}
-
-function formatUploadSize(bytes) {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
 function warnAboutActiveUploads(event) {

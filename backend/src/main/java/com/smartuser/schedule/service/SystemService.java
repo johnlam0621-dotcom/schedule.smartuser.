@@ -69,7 +69,7 @@ public class SystemService {
     String realName = StringUtils.hasText(user.getRealName()) ? user.getRealName().trim() : username;
     String roleCode = StringUtils.hasText(user.getRoleCode()) ? user.getRoleCode().trim() : "scheduler";
     Integer status = user.getStatus() == null ? 1 : user.getStatus();
-    if (!Arrays.asList("admin", "manager", "scheduler", "sales", "viewer", "inspector").contains(roleCode)) {
+    if (!Arrays.asList("admin", "manager", "quotation", "scheduler", "sales", "viewer", "inspector").contains(roleCode)) {
       throw new BadRequestException("Unsupported user role.");
     }
     if (status != 0 && status != 1) {

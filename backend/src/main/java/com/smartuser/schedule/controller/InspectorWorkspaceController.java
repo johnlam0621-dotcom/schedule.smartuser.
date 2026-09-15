@@ -6,8 +6,11 @@ import com.smartuser.schedule.model.CurrentUser;
 import com.smartuser.schedule.service.InspectorWorkspaceService;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpRange;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -19,8 +22,12 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import javax.servlet.http.HttpServletRequest;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.Collections;
@@ -52,6 +59,13 @@ public class InspectorWorkspaceController {
                                                                HttpServletRequest request) {
     LocalDate selected = weekStart == null || weekStart.isBlank() ? LocalDate.now() : LocalDate.parse(weekStart);
     return ApiResponse.ok(service.weeklyConfirmations(user(request), selected));
+  }
+
+  @GetMapping("/inspection-done/search")
+  public ApiResponse<Map<String, Object>> inspectionDoneSearch(@RequestParam(required = false) String macId,
+                                                                @RequestParam(required = false) String phone,
+                                                                HttpServletRequest request) {
+    return ApiResponse.ok(service.inspectionDoneSearch(user(request), macId, phone));
   }
 
   @PutMapping("/weekly-confirmations/{id}")
@@ -109,16 +123,50 @@ public class InspectorWorkspaceController {
     return ApiResponse.ok(service.upload(user(request), id, categoryKey, file));
   }
 
+  @PostMapping(value = "/route/{id}/photos/chunk", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+  public ApiResponse<Map<String, Object>> uploadChunk(@PathVariable long id,
+                                                      @RequestPart("categoryKey") String categoryKey,
+                                                      @RequestPart("uploadId") String uploadId,
+                                                      @RequestPart("chunkIndex") String chunkIndex,
+                                                      @RequestPart("totalChunks") String totalChunks,
+                                                      @RequestPart("file") MultipartFile file,
+                                                      HttpServletRequest request) throws Exception {
+    return ApiResponse.ok(service.uploadChunk(user(request), id, categoryKey, uploadId,
+        Integer.parseInt(chunkIndex), Integer.parseInt(totalChunks), file));
+  }
+
+  @PostMapping("/route/{id}/photos/complete")
+  public ApiResponse<Map<String, Object>> completeChunkUpload(@PathVariable long id,
+                                                               @RequestBody Map<String, Object> body,
+                                                               HttpServletRequest request) throws Exception {
+    return ApiResponse.ok(service.completeChunkUpload(user(request), id, string(body.get("categoryKey")),
+        string(body.get("uploadId")), Integer.parseInt(string(body.get("totalChunks"))),
+        Long.parseLong(string(body.get("totalSize"))), string(body.get("originalName")),
+        string(body.get("contentType"))));
+  }
+
   @GetMapping("/photos/{id}")
-  public ResponseEntity<?> photo(@PathVariable long id, HttpServletRequest request) {
-    InspectorWorkspaceService.PhotoDownload photo = service.photo(user(request), id);
-    MediaType type;
-    try { type = MediaType.parseMediaType(photo.contentType); } catch (Exception ignored) { type = MediaType.APPLICATION_OCTET_STREAM; }
-    return ResponseEntity.ok()
-        .contentType(type)
-        .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.inline()
-            .filename(photo.originalName, StandardCharsets.UTF_8).build().toString())
-        .body(photo.resource);
+  public ResponseEntity<StreamingResponseBody> photo(@PathVariable long id,
+                                                      @RequestParam(defaultValue = "false") boolean download,
+                                                      HttpServletRequest request) {
+    return mediaResponse(service.photo(user(request), id), download, request);
+  }
+
+  @PostMapping("/photos/{id}/playback/prepare")
+  public ApiResponse<Map<String, Object>> prepareVideoPlayback(@PathVariable long id, HttpServletRequest request) {
+    return ApiResponse.ok(service.prepareVideoPlayback(user(request), id));
+  }
+
+  @GetMapping("/photos/{id}/playback/status")
+  public ApiResponse<Map<String, Object>> videoPlaybackStatus(@PathVariable long id, HttpServletRequest request) {
+    return ApiResponse.ok(service.videoPlaybackStatus(user(request), id));
+  }
+
+  @GetMapping("/photos/{id}/playback")
+  public ResponseEntity<StreamingResponseBody> videoPlayback(@PathVariable long id,
+                                                              @RequestParam(defaultValue = "false") boolean download,
+                                                              HttpServletRequest request) {
+    return mediaResponse(service.videoPlayback(user(request), id), download, request);
   }
 
   @DeleteMapping("/photos/{id}")
@@ -137,6 +185,58 @@ public class InspectorWorkspaceController {
 
   private CurrentUser user(HttpServletRequest request) {
     return (CurrentUser) request.getAttribute(AuthInterceptor.CURRENT_USER_ATTRIBUTE);
+  }
+  ResponseEntity<StreamingResponseBody> mediaResponse(InspectorWorkspaceService.PhotoDownload media, boolean download,
+                                                       HttpServletRequest request) {
+    MediaType type;
+    try { type = MediaType.parseMediaType(media.contentType); } catch (Exception ignored) { type = MediaType.APPLICATION_OCTET_STREAM; }
+    String disposition = (download ? ContentDisposition.attachment() : ContentDisposition.inline())
+        .filename(media.originalName, StandardCharsets.UTF_8).build().toString();
+    long contentLength;
+    try {
+      contentLength = media.resource.contentLength();
+    } catch (IOException ex) {
+      throw new IllegalStateException("Media file size could not be read.", ex);
+    }
+    String rangeHeader = request.getHeader(HttpHeaders.RANGE);
+    if (StringUtils.hasText(rangeHeader)) {
+      try {
+        HttpRange range = HttpRange.parseRanges(rangeHeader).get(0);
+        long start = range.getRangeStart(contentLength);
+        long end = range.getRangeEnd(contentLength);
+        long rangeLength = end - start + 1;
+        return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+            .contentType(type)
+            .header(HttpHeaders.CONTENT_DISPOSITION, disposition)
+            .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+            .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + contentLength)
+            .header(HttpHeaders.CACHE_CONTROL, "private, max-age=3600")
+            .contentLength(rangeLength)
+            .body(output -> copyMediaRange(media.resource.getInputStream(), output, start, rangeLength));
+      } catch (Exception ignored) {
+        // Invalid range: return the complete file below.
+      }
+    }
+    return ResponseEntity.ok().contentType(type)
+        .header(HttpHeaders.CONTENT_DISPOSITION, disposition)
+        .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+        .header(HttpHeaders.CACHE_CONTROL, "private, max-age=3600")
+        .contentLength(contentLength)
+        .body(output -> copyMediaRange(media.resource.getInputStream(), output, 0, contentLength));
+  }
+
+  private void copyMediaRange(InputStream source, OutputStream target, long start, long count) throws IOException {
+    try (InputStream input = source) {
+      input.skipNBytes(start);
+      byte[] buffer = new byte[64 * 1024];
+      long remaining = count;
+      while (remaining > 0) {
+        int read = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+        if (read < 0) break;
+        target.write(buffer, 0, read);
+        remaining -= read;
+      }
+    }
   }
   private String string(Object value) { return value == null ? "" : String.valueOf(value); }
 }

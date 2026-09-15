@@ -1,8 +1,12 @@
 import { computed, reactive } from 'vue'
 
 const activeStatuses = new Set(['queued', 'uploading'])
+// Photos and videos use separate lanes. A slow video must never occupy every
+// worker and leave a newly captured inspection photo waiting behind it.
+const maximumConcurrentByType = Object.freeze({ photo: 2, video: 1 })
+const completedUploadVisibilityMs = 1500
 let sequence = 0
-let processing = false
+const activeWorkersByType = { photo: 0, video: 0 }
 
 export const uploadQueueState = reactive({
   items: []
@@ -12,7 +16,8 @@ export const activeUploadCount = computed(() =>
   uploadQueueState.items.filter((item) => activeStatuses.has(item.status)).length
 )
 
-export function queueBackgroundUpload({ name, size, description, upload }) {
+export function queueBackgroundUpload({ name, size, description, mediaType = 'photo', upload }) {
+  const normalizedMediaType = mediaType === 'video' ? 'video' : 'photo'
   const item = reactive({
     id: `${Date.now()}-${++sequence}`,
     name,
@@ -20,11 +25,12 @@ export function queueBackgroundUpload({ name, size, description, upload }) {
     description,
     progress: 0,
     status: 'queued',
+    mediaType: normalizedMediaType,
     error: '',
     upload
   })
   uploadQueueState.items.unshift(item)
-  void processQueue()
+  processQueue()
   return item
 }
 
@@ -34,7 +40,7 @@ export function retryBackgroundUpload(id) {
   item.error = ''
   item.progress = 0
   item.status = 'queued'
-  void processQueue()
+  processQueue()
 }
 
 export function dismissBackgroundUpload(id) {
@@ -44,28 +50,38 @@ export function dismissBackgroundUpload(id) {
   }
 }
 
-async function processQueue() {
-  if (processing) return
-  processing = true
-  try {
-    let item = uploadQueueState.items.find((candidate) => candidate.status === 'queued')
-    while (item) {
+function processQueue() {
+  // Start photos first, then fill the independent video lane. This keeps the
+  // camera workflow responsive even while one or more large videos are active.
+  for (const mediaType of ['photo', 'video']) {
+    while (activeWorkersByType[mediaType] < maximumConcurrentByType[mediaType]) {
+      const item = uploadQueueState.items.find((candidate) =>
+        candidate.status === 'queued' && candidate.mediaType === mediaType
+      )
+      if (!item) break
       item.status = 'uploading'
       item.error = ''
-      try {
-        await item.upload((progress) => {
-          item.progress = Math.max(1, Math.min(100, Math.round(progress || 0)))
-        })
-        item.progress = 100
-        item.status = 'complete'
-      } catch (error) {
-        item.status = 'failed'
-        item.error = error?.message || 'Upload failed. Check the connection and retry.'
-      }
-      item = uploadQueueState.items.find((candidate) => candidate.status === 'queued')
+      activeWorkersByType[mediaType] += 1
+      void runUpload(item)
     }
-  } finally {
-    processing = false
   }
 }
 
+async function runUpload(item) {
+  try {
+    await item.upload((progress) => {
+      item.progress = Math.max(1, Math.min(100, Math.round(progress || 0)))
+    })
+    item.progress = 100
+    item.status = 'complete'
+    // Successful uploads need no inspector action. Briefly show success, then
+    // remove the item so the mobile panel closes automatically when it is empty.
+    window.setTimeout(() => dismissBackgroundUpload(item.id), completedUploadVisibilityMs)
+  } catch (error) {
+    item.status = 'failed'
+    item.error = error?.message || 'Upload failed. Check the connection and retry.'
+  } finally {
+    activeWorkersByType[item.mediaType] = Math.max(0, activeWorkersByType[item.mediaType] - 1)
+    processQueue()
+  }
+}

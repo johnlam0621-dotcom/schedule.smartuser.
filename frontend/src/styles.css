@@ -1919,7 +1919,7 @@ tr.schedule-row:nth-child(4n + 2) td {
 .photo-heading span { color: #58708f; font-size: 11px; }
 .photo-product-selector {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 .photo-product-selector button {
@@ -1989,6 +1989,14 @@ tr.schedule-row:nth-child(4n + 2) td {
 .uploaded-file-row .photo-remark-action:hover:not(:disabled) { background: #dcf3ea; }
 .uploaded-file-row .delete-upload { flex: 0 0 auto; width: auto; min-height: 25px; padding: 3px 7px; border: 1px solid #e2a4a0; background: #fff4f3; color: #a72b25; font-size: 9px; }
 .uploaded-file-row .delete-upload:hover:not(:disabled) { background: #ffe3e0; }
+.uploaded-file-row .video-file-download { flex: 0 0 auto; padding: 5px 7px; border: 1px solid #86b7a6; border-radius: 4px; background: #effaf6; color: #17664d; font-size: 9px; text-decoration: none; }
+.inspector-video-backdrop { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 20px; background: rgba(12, 23, 40, .88); }
+.inspector-video-dialog { position: relative; width: min(960px, 100%); max-height: 94vh; overflow: auto; padding: 14px; border-radius: 12px; background: #fff; }
+.inspector-video-dialog video { display: block; width: 100%; max-height: 75vh; background: #081221; }
+.inspector-video-dialog footer { display: grid; gap: 4px; padding: 12px 4px 2px; }
+.inspector-video-dialog footer span { color: #61758e; font-size: 12px; }
+.inspector-video-dialog footer a { width: max-content; margin-top: 5px; color: #0868c9; font-weight: 700; }
+.inspector-video-preparing,.video-preparing { min-height: 280px; display: grid; place-items: center; background: #081221; color: #fff; }
 .saved-photo-remark { padding: 6px 7px; border-left: 3px solid #55a083; border-radius: 4px; background: #effaf6; color: #244e40; font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; text-align: left; }
 .photo-remark-editor { display: grid; gap: 6px; padding: 7px; border: 1px solid #86b7a6; border-radius: 6px; background: #f6fcf9; }
 .photo-remark-editor textarea { width: 100%; min-height: 62px; resize: vertical; font-size: 11px; }

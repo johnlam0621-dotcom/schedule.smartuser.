@@ -32,6 +32,7 @@ public class DatabaseSchemaInitializer implements ApplicationRunner {
     ensureInspectorWorkspace();
     ensureSchedulerLimitedPermissions();
     ensureSalesLimitedPermissions();
+    ensureQuotationRole();
     ensureManagerRoleAndPermissions();
   }
 
@@ -154,9 +155,9 @@ public class DatabaseSchemaInitializer implements ApplicationRunner {
 
   private void ensureManagerRoleAndPermissions() {
     try {
-      LOG.info("Verifying the Manager role and full page permissions");
+      LOG.info("Verifying the Manager role without confirmation approval access");
       jdbcTemplate.update(
-          "INSERT INTO sys_role(code, name, description) VALUES('manager', 'Manager', 'Full system page access') " +
+          "INSERT INTO sys_role(code, name, description) VALUES('manager', 'Manager', 'System access excluding inspection confirmation') " +
               "ON DUPLICATE KEY UPDATE name = VALUES(name), description = VALUES(description)");
       jdbcTemplate.update(
           "DELETE FROM sys_role_permission WHERE role_code = 'manager' " +
@@ -168,11 +169,24 @@ public class DatabaseSchemaInitializer implements ApplicationRunner {
               "ON DUPLICATE KEY UPDATE permission_code = VALUES(permission_code)");
       jdbcTemplate.update(
           "INSERT INTO sys_menu(parent_id, name, path, component, permission_code, sort_order, visible) " +
-              "VALUES(0, 'Confirm Inspection', '/inspections/confirm', 'InspectionConfirmationView', NULL, 72, 1) " +
+              "VALUES(0, 'Inspection Done', '/inspections/confirm', 'InspectionConfirmationView', NULL, 72, 1) " +
               "ON DUPLICATE KEY UPDATE name = VALUES(name), component = VALUES(component), sort_order = VALUES(sort_order), visible = VALUES(visible)");
-      LOG.info("Manager role and full page permissions verified");
+      LOG.info("Manager role permissions verified");
     } catch (Exception ex) {
       LOG.warn("Unable to verify the Manager role temporarily; backend startup will continue error={}", ex.getMessage());
+    }
+  }
+
+  private void ensureQuotationRole() {
+    try {
+      LOG.info("Verifying the Quotation Team role");
+      jdbcTemplate.update(
+          "INSERT INTO sys_role(code, name, description) VALUES('quotation', 'Quotation Team', 'Inspector Photos and Inspection Done access') " +
+              "ON DUPLICATE KEY UPDATE name = VALUES(name), description = VALUES(description)");
+      jdbcTemplate.update("DELETE FROM sys_role_permission WHERE role_code = 'quotation'");
+      LOG.info("Quotation Team role verified");
+    } catch (Exception ex) {
+      LOG.warn("Unable to verify the Quotation Team role temporarily; backend startup will continue error={}", ex.getMessage());
     }
   }
 

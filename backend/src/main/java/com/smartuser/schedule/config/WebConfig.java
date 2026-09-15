@@ -1,7 +1,10 @@
 package com.smartuser.schedule.config;
 
 import org.springframework.context.annotation.Configuration;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.AsyncSupportConfigurer;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
@@ -16,9 +19,18 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 @Configuration
 public class WebConfig implements WebMvcConfigurer {
   private final AuthInterceptor authInterceptor;
+  private final AsyncTaskExecutor mediaStreamingExecutor;
 
-  public WebConfig(AuthInterceptor authInterceptor) {
+  public WebConfig(AuthInterceptor authInterceptor,
+                   @Qualifier("mediaStreamingExecutor") AsyncTaskExecutor mediaStreamingExecutor) {
     this.authInterceptor = authInterceptor;
+    this.mediaStreamingExecutor = mediaStreamingExecutor;
+  }
+
+  @Override
+  public void configureAsyncSupport(AsyncSupportConfigurer configurer) {
+    configurer.setTaskExecutor(mediaStreamingExecutor);
+    configurer.setDefaultTimeout(30L * 60L * 1000L);
   }
 
   /**

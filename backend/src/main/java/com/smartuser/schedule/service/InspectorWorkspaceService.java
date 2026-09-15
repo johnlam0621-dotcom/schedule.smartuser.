@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -31,6 +32,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import javax.annotation.PreDestroy;
 
 /**
  * 巡检员移动工作台业务。
@@ -83,10 +88,17 @@ public class InspectorWorkspaceService {
       new String[]{"additional_photo_8", "Additional Photo 8", "additional"},
       new String[]{"additional_photo_9", "Additional Photo 9", "additional"},
       new String[]{"additional_photo_10", "Additional Photo 10", "additional"},
+      new String[]{"additional_photo_11", "Additional Photo 11", "additional"},
+      new String[]{"additional_photo_12", "Additional Photo 12", "additional"},
       new String[]{"inspection_video_1", "Inspection Video 1", "video"},
       new String[]{"inspection_video_2", "Inspection Video 2", "video"},
       new String[]{"inspection_video_3", "Inspection Video 3", "video"},
-      new String[]{"inspection_video_4", "Inspection Video 4", "video"}
+      new String[]{"inspection_video_4", "Inspection Video 4", "video"},
+      new String[]{"inspection_video_5", "Inspection Video 5", "video"},
+      new String[]{"inspection_video_6", "Inspection Video 6", "video"},
+      new String[]{"inspection_video_7", "Inspection Video 7", "video"},
+      new String[]{"inspection_video_8", "Inspection Video 8", "video"},
+      new String[]{"inspection_video_9", "Inspection Video 9", "video"}
   );
   private static final List<String[]> REQUIRED_COMPLETION_PHOTOS = Arrays.asList(
       new String[]{"switchboard", "Switchboard"},
@@ -106,6 +118,14 @@ public class InspectorWorkspaceService {
 
   private final JdbcTemplate jdbcTemplate;
   private final Path uploadRoot;
+  private final ExecutorService videoPlaybackExecutor = Executors.newFixedThreadPool(2, runnable -> {
+    Thread thread = new Thread(runnable, "inspection-video-converter");
+    thread.setDaemon(true);
+    return thread;
+  });
+  private final Map<Long, String> videoPlaybackStates = new ConcurrentHashMap<>();
+  @Value("${schedule.inspector.ffmpeg-path:/usr/local/bin/ffmpeg}")
+  private String ffmpegPath;
 
   public InspectorWorkspaceService(JdbcTemplate jdbcTemplate,
                                    @Value("${schedule.inspector.upload-dir:uploads}") String uploadDir) {
@@ -135,7 +155,7 @@ public class InspectorWorkspaceService {
 
   /** 管理员照片审核页只读取本地数据库和上传目录，不修改路线或 Google Sheet。 */
   public Map<String, Object> photoReview(CurrentUser user, String inspector, LocalDate date) {
-    requireManager(user);
+    requirePhotoReviewer(user);
     List<String> inspectors = jdbcTemplate.queryForList(
         "SELECT DISTINCT TRIM(inspector) FROM schedule_inspection " +
             "WHERE COALESCE(TRIM(inspector), '') <> '' ORDER BY TRIM(inspector)", String.class);
@@ -171,11 +191,11 @@ public class InspectorWorkspaceService {
 
   /** Weekly manager sign-off view, grouped by inspector and backed only by the local inspection database. */
   public Map<String, Object> weeklyConfirmations(CurrentUser user, LocalDate selectedDate) {
-    requireManager(user);
+    requireConfirmationReviewer(user);
     LocalDate weekStart = selectedDate.with(DayOfWeek.MONDAY);
     LocalDate weekEnd = weekStart.plusDays(6);
     List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-        "SELECT id, inspector, mac_id, customer_name, first_name, last_name, address, suburb, " +
+        "SELECT id, inspector, mac_id, customer_name, first_name, last_name, phone_number, address, suburb, " +
             "inspection_date, inspection_time, projects, scheduler_remarks, inspector_remark, field_status, " +
             "manager_confirmed, manager_confirmed_by, manager_confirmed_at " +
             "FROM schedule_inspection WHERE inspection_date BETWEEN ? AND ? " +
@@ -188,25 +208,7 @@ public class InspectorWorkspaceService {
         weekStart, weekEnd);
     List<Map<String, Object>> jobs = new ArrayList<>();
     for (Map<String, Object> row : rows) {
-      Map<String, Object> job = new LinkedHashMap<>();
-      String status = value(row.get("field_status")).trim().toLowerCase(Locale.ROOT);
-      if (!StringUtils.hasText(status)) status = "fixed";
-      job.put("id", row.get("id"));
-      job.put("inspector", value(row.get("inspector")).trim());
-      job.put("macId", value(row.get("mac_id")));
-      job.put("customerName", customerName(value(row.get("customer_name")), value(row.get("first_name")), value(row.get("last_name"))));
-      job.put("address", value(row.get("address")));
-      job.put("suburb", value(row.get("suburb")));
-      job.put("date", dateValue(row.get("inspection_date")));
-      job.put("start", normalizeTime(value(row.get("inspection_time"))));
-      job.put("projects", value(row.get("projects")));
-      job.put("schedulerRemarks", value(row.get("scheduler_remarks")));
-      job.put("inspectorRemark", value(row.get("inspector_remark")));
-      job.put("fieldStatus", status);
-      job.put("confirmed", number(row.get("manager_confirmed")) == 1);
-      job.put("confirmedBy", value(row.get("manager_confirmed_by")));
-      job.put("confirmedAt", row.get("manager_confirmed_at"));
-      jobs.add(job);
+      jobs.add(confirmationJob(row));
     }
     Map<Long, List<Map<String, Object>>> photosByInspection = loadRoutePhotos(jobs);
     for (Map<String, Object> job : jobs) {
@@ -238,9 +240,71 @@ public class InspectorWorkspaceService {
     return response;
   }
 
+  /** Search inspection evidence directly by MACID and/or phone, without a week restriction. */
+  public Map<String, Object> inspectionDoneSearch(CurrentUser user, String macId, String phone) {
+    requireConfirmationReviewer(user);
+    String macIdQuery = value(macId).trim();
+    String phoneQuery = value(phone).replaceAll("[^0-9]", "");
+    if (!StringUtils.hasText(macIdQuery) && !StringUtils.hasText(phoneQuery)) {
+      throw new BadRequestException("Enter a MACID or phone number.");
+    }
+
+    StringBuilder sql = new StringBuilder(
+        "SELECT id, inspector, mac_id, customer_name, first_name, last_name, phone_number, address, suburb, " +
+            "inspection_date, inspection_time, projects, scheduler_remarks, inspector_remark, field_status, " +
+            "manager_confirmed, manager_confirmed_by, manager_confirmed_at " +
+            "FROM schedule_inspection WHERE COALESCE(LOWER(status), '') NOT IN ('cancelled', 'canceled', 'open slot') ");
+    List<Object> parameters = new ArrayList<>();
+    if (StringUtils.hasText(macIdQuery)) {
+      sql.append("AND LOWER(TRIM(mac_id)) LIKE ? ");
+      parameters.add("%" + macIdQuery.toLowerCase(Locale.ROOT) + "%");
+    }
+    if (StringUtils.hasText(phoneQuery)) {
+      sql.append("AND REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(phone_number, ''), ' ', ''), '-', ''), '(', ''), ')', ''), '+', '') LIKE ? ");
+      parameters.add("%" + phoneQuery + "%");
+    }
+    sql.append("ORDER BY inspection_date DESC, inspection_time DESC, id DESC LIMIT 50");
+
+    List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql.toString(), parameters.toArray());
+    List<Map<String, Object>> jobs = new ArrayList<>();
+    for (Map<String, Object> row : rows) jobs.add(confirmationJob(row));
+    Map<Long, List<Map<String, Object>>> photosByInspection = loadRoutePhotos(jobs);
+    for (Map<String, Object> job : jobs) {
+      long inspectionId = number(job.get("id"));
+      job.put("photoSlots", photoSlots(photosByInspection.getOrDefault(inspectionId, List.of()), value(job.get("projects"))));
+    }
+    Map<String, Object> response = new LinkedHashMap<>();
+    response.put("jobCount", jobs.size());
+    response.put("jobs", jobs);
+    return response;
+  }
+
+  private Map<String, Object> confirmationJob(Map<String, Object> row) {
+    Map<String, Object> job = new LinkedHashMap<>();
+    String status = value(row.get("field_status")).trim().toLowerCase(Locale.ROOT);
+    if (!StringUtils.hasText(status)) status = "fixed";
+    job.put("id", row.get("id"));
+    job.put("inspector", value(row.get("inspector")).trim());
+    job.put("macId", value(row.get("mac_id")));
+    job.put("phoneNumber", value(row.get("phone_number")));
+    job.put("customerName", customerName(value(row.get("customer_name")), value(row.get("first_name")), value(row.get("last_name"))));
+    job.put("address", value(row.get("address")));
+    job.put("suburb", value(row.get("suburb")));
+    job.put("date", dateValue(row.get("inspection_date")));
+    job.put("start", normalizeTime(value(row.get("inspection_time"))));
+    job.put("projects", value(row.get("projects")));
+    job.put("schedulerRemarks", value(row.get("scheduler_remarks")));
+    job.put("inspectorRemark", value(row.get("inspector_remark")));
+    job.put("fieldStatus", status);
+    job.put("confirmed", number(row.get("manager_confirmed")) == 1);
+    job.put("confirmedBy", value(row.get("manager_confirmed_by")));
+    job.put("confirmedAt", row.get("manager_confirmed_at"));
+    return job;
+  }
+
   @Transactional
   public void confirmInspection(CurrentUser user, long inspectionId, boolean confirmed) {
-    requireManager(user);
+    requireConfirmationReviewer(user);
     List<Map<String, Object>> rows = jdbcTemplate.queryForList(
         "SELECT field_status FROM schedule_inspection WHERE id = ?", inspectionId);
     if (rows.isEmpty()) throw new BadRequestException("Inspection was not found.");
@@ -344,7 +408,7 @@ public class InspectorWorkspaceService {
 
   /**
    * 将任务标记为完成前按产品检查必需媒体。
-   * 空调沿用九张现场照片；电池/太阳能要求位置、平面图、测量资料和室内/室外视频。
+   * MAC/DAC 沿用九张现场照片；电池/太阳能只要求配电箱和一个室内或室外电池位置照片。
    * 该校验位于后端，避免用户绕过前端直接调用接口完成任务。
    */
   private void requireCompletionPhotos(long inspectionId) {
@@ -367,17 +431,11 @@ public class InspectorWorkspaceService {
       }
     }
     if (batterySolar) {
+      if (!uploadedKeys.contains("switchboard") && !uploadedKeys.contains("battery_unit")) {
+        missingLabels.add("Switchboard photo");
+      }
       if (!uploadedKeys.contains("battery_serial_label") && !uploadedKeys.contains("battery_location")) {
         missingLabels.add("Battery location photo (indoor or outdoor)");
-      }
-      if (!uploadedKeys.contains("drawn_floor_plan_measurements")) {
-        missingLabels.add("Floor Plan");
-      }
-      if (!uploadedKeys.contains("battery_measurements")) {
-        missingLabels.add("Measurements");
-      }
-      if (!uploadedKeys.contains("battery_indoor_outdoor_video")) {
-        missingLabels.add("Indoor / Outdoor Area Video");
       }
     }
     if (!missingLabels.isEmpty()) {
@@ -525,7 +583,113 @@ public class InspectorWorkspaceService {
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("id", id);
     result.put("url", "/api/inspector/photos/" + id);
+    if (videoSlot) scheduleVideoPlayback(id, storedPath);
     return result;
+  }
+
+  /** Saves one independently retryable piece of a large upload. */
+  public Map<String, Object> uploadChunk(CurrentUser user, long inspectionId, String categoryKey, String uploadId,
+                                         int chunkIndex, int totalChunks, MultipartFile chunk) throws IOException {
+    requireInspectionMediaAccess(user, inspectionId);
+    uploadSlot(categoryKey);
+    validateUploadId(uploadId);
+    if (totalChunks < 1 || totalChunks > 1000 || chunkIndex < 0 || chunkIndex >= totalChunks) {
+      throw new BadRequestException("Invalid upload chunk information.");
+    }
+    if (chunk == null || chunk.isEmpty() || chunk.getSize() > 20L * 1024 * 1024) {
+      throw new BadRequestException("Each upload chunk must be 20 MB or smaller.");
+    }
+    Path session = chunkSessionPath(inspectionId, uploadId);
+    Files.createDirectories(session);
+    Path part = session.resolve(String.format(Locale.ROOT, "%04d.part", chunkIndex)).normalize();
+    if (!part.startsWith(session)) throw new BadRequestException("Invalid upload chunk path.");
+    Files.copy(chunk.getInputStream(), part, StandardCopyOption.REPLACE_EXISTING);
+    return Map.of("uploadId", uploadId, "chunkIndex", chunkIndex, "received", true);
+  }
+
+  /** Atomically assembles uploaded pieces and creates the media database record. */
+  @Transactional
+  public Map<String, Object> completeChunkUpload(CurrentUser user, long inspectionId, String categoryKey,
+                                                  String uploadId, int totalChunks, long totalSize,
+                                                  String originalName, String contentType) throws IOException {
+    requireInspectionMediaAccess(user, inspectionId);
+    String[] slot = uploadSlot(categoryKey);
+    validateUploadId(uploadId);
+    boolean videoSlot = value(slot[2]).contains("video");
+    validateMediaMetadata(videoSlot, totalSize, originalName, contentType);
+    if (totalChunks < 1 || totalChunks > 1000) throw new BadRequestException("Invalid upload chunk information.");
+    Path session = chunkSessionPath(inspectionId, uploadId);
+    Path folder = uploadRoot.resolve(String.valueOf(inspectionId)).normalize();
+    Files.createDirectories(folder);
+    String storedName = UUID.randomUUID() + safeExtension(originalName, contentType, videoSlot);
+    Path storedPath = folder.resolve(storedName).normalize();
+    long assembledSize = 0;
+    try (OutputStream output = Files.newOutputStream(storedPath)) {
+      for (int index = 0; index < totalChunks; index++) {
+        Path part = session.resolve(String.format(Locale.ROOT, "%04d.part", index)).normalize();
+        if (!part.startsWith(session) || !Files.isRegularFile(part)) {
+          throw new BadRequestException("Upload is incomplete. Retry the missing part.");
+        }
+        assembledSize += Files.size(part);
+        if (assembledSize > totalSize) throw new BadRequestException("Uploaded file size does not match. Please retry.");
+        Files.copy(part, output);
+      }
+    } catch (IOException | RuntimeException ex) {
+      Files.deleteIfExists(storedPath);
+      throw ex;
+    }
+    if (assembledSize != totalSize) {
+      Files.deleteIfExists(storedPath);
+      throw new BadRequestException("Uploaded file size does not match. Please retry.");
+    }
+    Long id;
+    try {
+      jdbcTemplate.update(
+          "INSERT INTO inspection_photo(inspection_id, category_key, category_label, original_name, stored_name, content_type, file_size, uploaded_by) VALUES(?,?,?,?,?,?,?,?)",
+          inspectionId, categoryKey, slot[1], originalName, storedName, contentType, assembledSize, user.getId());
+      id = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
+      clearManagerConfirmation(inspectionId);
+    } catch (RuntimeException ex) {
+      Files.deleteIfExists(storedPath);
+      throw ex;
+    }
+    for (int index = 0; index < totalChunks; index++) {
+      Files.deleteIfExists(session.resolve(String.format(Locale.ROOT, "%04d.part", index)));
+    }
+    Files.deleteIfExists(session);
+    if (videoSlot) scheduleVideoPlayback(id, storedPath);
+    return Map.of("id", id, "url", "/api/inspector/photos/" + id);
+  }
+
+  private String[] uploadSlot(String categoryKey) {
+    return PHOTO_SLOTS.stream().filter(item -> item[0].equals(categoryKey)).findFirst()
+        .orElseThrow(() -> new BadRequestException("Unknown photo category."));
+  }
+
+  private void validateUploadId(String uploadId) {
+    if (!value(uploadId).matches("[a-fA-F0-9-]{36}")) throw new BadRequestException("Invalid upload ID.");
+  }
+
+  private Path chunkSessionPath(long inspectionId, String uploadId) {
+    Path chunkRoot = uploadRoot.resolve(".chunks").resolve(String.valueOf(inspectionId)).normalize();
+    Path session = chunkRoot.resolve(uploadId).normalize();
+    if (!session.startsWith(chunkRoot)) throw new BadRequestException("Invalid upload path.");
+    return session;
+  }
+
+  private void validateMediaMetadata(boolean videoSlot, long size, String name, String contentType) {
+    long maximumBytes = videoSlot ? 3L * 1024 * 1024 * 1024 : 20L * 1024 * 1024;
+    if (size < 1 || size > maximumBytes) {
+      throw new BadRequestException(videoSlot ? "Video must be 3 GB or smaller." : "Photo must be 20MB or smaller.");
+    }
+    String normalized = value(contentType).toLowerCase(Locale.ROOT);
+    if (videoSlot && !SAFE_VIDEO_TYPES.contains(normalized)) {
+      throw new BadRequestException("Only MP4, MOV, WEBM, M4V or 3GP video files are accepted.");
+    }
+    if (!videoSlot && !SAFE_IMAGE_TYPES.contains(normalized)) {
+      throw new BadRequestException("Only JPG, PNG, GIF, WEBP or HEIC image files are accepted.");
+    }
+    if (!StringUtils.hasText(name) || name.length() > 255) throw new BadRequestException("Invalid file name.");
   }
 
   public PhotoDownload photo(CurrentUser user, long photoId) {
@@ -533,10 +697,116 @@ public class InspectorWorkspaceService {
         "SELECT p.inspection_id, p.stored_name, p.original_name, p.content_type FROM inspection_photo p WHERE p.id = ?", photoId);
     if (rows.isEmpty()) throw new BadRequestException("Photo was not found.");
     long inspectionId = number(rows.get(0).get("inspection_id"));
-    if (!isManager(user)) requireOwnedInspection(user, inspectionId);
+    if (!isPhotoReviewer(user)) requireOwnedInspection(user, inspectionId);
     Path file = uploadRoot.resolve(String.valueOf(inspectionId)).resolve(value(rows.get(0).get("stored_name"))).normalize();
     if (!file.startsWith(uploadRoot) || !Files.isRegularFile(file)) throw new BadRequestException("Photo file was not found.");
     return new PhotoDownload(new FileSystemResource(file), value(rows.get(0).get("content_type")), value(rows.get(0).get("original_name")));
+  }
+
+  /** Starts a non-blocking conversion to a browser-safe H.264/AAC MP4 copy. */
+  public Map<String, Object> prepareVideoPlayback(CurrentUser user, long photoId) {
+    VideoSource source = videoSource(user, photoId);
+    Path playback = playbackPath(source.file);
+    String status = Files.isRegularFile(playback) ? "ready" : scheduleVideoPlayback(photoId, source.file);
+    Map<String, Object> result = new LinkedHashMap<>();
+    result.put("status", status);
+    result.put("playbackUrl", "/api/inspector/photos/" + photoId + "/playback");
+    return result;
+  }
+
+  /** Queue browser playback preparation as soon as an upload finishes. */
+  private String scheduleVideoPlayback(long photoId, Path original) {
+    Path playback = playbackPath(original);
+    if (Files.isRegularFile(playback)) return "ready";
+    return videoPlaybackStates.compute(photoId, (id, current) -> {
+      if ("processing".equals(current) || "ready".equals(current)) return current;
+      videoPlaybackExecutor.submit(() -> convertVideo(photoId, original, playback));
+      return "processing";
+    });
+  }
+
+  public Map<String, Object> videoPlaybackStatus(CurrentUser user, long photoId) {
+    VideoSource source = videoSource(user, photoId);
+    String status = Files.isRegularFile(playbackPath(source.file))
+        ? "ready"
+        : videoPlaybackStates.getOrDefault(photoId, "not_started");
+    return Map.of("status", status, "playbackUrl", "/api/inspector/photos/" + photoId + "/playback");
+  }
+
+  public PhotoDownload videoPlayback(CurrentUser user, long photoId) {
+    VideoSource source = videoSource(user, photoId);
+    Path playback = playbackPath(source.file);
+    if (!Files.isRegularFile(playback)) throw new BadRequestException("Browser video is still being prepared.");
+    String name = source.originalName.replaceFirst("(?i)\\.[^.]+$", "") + "-browser.mp4";
+    return new PhotoDownload(new FileSystemResource(playback), "video/mp4", name);
+  }
+
+  private VideoSource videoSource(CurrentUser user, long photoId) {
+    List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+        "SELECT p.inspection_id, p.stored_name, p.original_name, p.content_type, p.category_key " +
+            "FROM inspection_photo p WHERE p.id = ?", photoId);
+    if (rows.isEmpty()) throw new BadRequestException("Video was not found.");
+    Map<String, Object> row = rows.get(0);
+    long inspectionId = number(row.get("inspection_id"));
+    if (!isPhotoReviewer(user)) requireOwnedInspection(user, inspectionId);
+    String contentType = value(row.get("content_type")).toLowerCase(Locale.ROOT);
+    String categoryKey = value(row.get("category_key")).toLowerCase(Locale.ROOT);
+    if (!contentType.startsWith("video/") && !categoryKey.contains("video")) {
+      throw new BadRequestException("This uploaded file is not a video.");
+    }
+    Path file = uploadRoot.resolve(String.valueOf(inspectionId)).resolve(value(row.get("stored_name"))).normalize();
+    if (!file.startsWith(uploadRoot) || !Files.isRegularFile(file)) throw new BadRequestException("Video file was not found.");
+    return new VideoSource(file, value(row.get("original_name")));
+  }
+
+  private Path playbackPath(Path original) {
+    return original.resolveSibling(original.getFileName() + ".browser.mp4");
+  }
+
+  private void convertVideo(long photoId, Path original, Path playback) {
+    Path temporary = playback.resolveSibling(playback.getFileName() + "." + UUID.randomUUID() + ".tmp");
+    try {
+      Process process = new ProcessBuilder(
+          StringUtils.hasText(ffmpegPath) ? ffmpegPath : "/usr/local/bin/ffmpeg",
+          "-nostdin", "-y", "-i", original.toString(),
+          "-map", "0:v:0", "-map", "0:a:0?",
+          // A lightweight 720p copy starts much faster on phones and remains
+          // compatible with Chrome. The full-resolution original is preserved.
+          "-vf", "fps=24,scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2",
+          "-c:v", "libx264", "-profile:v", "high", "-level:v", "4.1",
+          "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
+          "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+          // The atomic staging filename ends in .tmp, so FFmpeg cannot infer the
+          // container from its extension. Declare MP4 explicitly.
+          "-f", "mp4", temporary.toString())
+          .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+          .redirectError(ProcessBuilder.Redirect.DISCARD)
+          .start();
+      int exitCode = process.waitFor();
+      if (exitCode != 0 || !Files.isRegularFile(temporary) || Files.size(temporary) == 0) {
+        throw new IOException("FFmpeg exited with code " + exitCode);
+      }
+      try {
+        Files.move(temporary, playback, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+      } catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
+        Files.move(temporary, playback, StandardCopyOption.REPLACE_EXISTING);
+      }
+      videoPlaybackStates.put(photoId, "ready");
+    } catch (InterruptedException ex) {
+      Thread.currentThread().interrupt();
+      videoPlaybackStates.put(photoId, "failed");
+      LOG.warn("Video playback conversion interrupted photoId={}", photoId);
+    } catch (Exception ex) {
+      videoPlaybackStates.put(photoId, "failed");
+      LOG.warn("Video playback conversion failed photoId={} reason={}", photoId, ex.getMessage());
+    } finally {
+      try { Files.deleteIfExists(temporary); } catch (IOException ignored) { }
+    }
+  }
+
+  @PreDestroy
+  public void stopVideoPlaybackExecutor() {
+    videoPlaybackExecutor.shutdownNow();
   }
 
   @Transactional
@@ -556,9 +826,19 @@ public class InspectorWorkspaceService {
     // 旧版本上传文件可能属于不同 Linux 账号；物理文件删除失败不应阻止检查员移除数据库记录。
     try {
       Files.deleteIfExists(file);
+      Files.deleteIfExists(playbackPath(file));
     } catch (IOException | SecurityException ex) {
       LOG.warn("Uploaded file record deleted but legacy file cleanup failed photoId={} path={} reason={}",
           photoId, file, ex.getMessage());
+    }
+  }
+
+  private static class VideoSource {
+    private final Path file;
+    private final String originalName;
+    private VideoSource(Path file, String originalName) {
+      this.file = file;
+      this.originalName = originalName;
     }
   }
 
@@ -634,9 +914,9 @@ public class InspectorWorkspaceService {
     if (count == null || count < 1) throw new BadRequestException("This inspection is not assigned to the current inspector.");
   }
 
-  /** Inspectors may edit their assigned media; managers and administrators may edit any reviewed job. */
+  /** Inspectors may edit assigned media; photo reviewers may edit any reviewed job. */
   private void requireInspectionMediaAccess(CurrentUser user, long inspectionId) {
-    if (!isManager(user)) {
+    if (!isPhotoReviewer(user)) {
       requireOwnedInspection(user, inspectionId);
       return;
     }
@@ -665,9 +945,31 @@ public class InspectorWorkspaceService {
     }
   }
 
+  private void requirePhotoReviewer(CurrentUser user) {
+    if (!isPhotoReviewer(user)) {
+      throw new BadRequestException("Photo reviewer access is required.");
+    }
+  }
+
+  private void requireConfirmationReviewer(CurrentUser user) {
+    if (!isConfirmationReviewer(user)) {
+      throw new BadRequestException("Confirmation reviewer access is required.");
+    }
+  }
+
   private boolean isManager(CurrentUser user) {
     String role = user == null ? "" : value(user.getRoleCode()).toLowerCase(Locale.ROOT);
     return "admin".equals(role) || "manager".equals(role);
+  }
+
+  private boolean isPhotoReviewer(CurrentUser user) {
+    String role = user == null ? "" : value(user.getRoleCode()).toLowerCase(Locale.ROOT);
+    return "admin".equals(role) || "manager".equals(role) || "quotation".equals(role);
+  }
+
+  private boolean isConfirmationReviewer(CurrentUser user) {
+    String role = user == null ? "" : value(user.getRoleCode()).toLowerCase(Locale.ROOT);
+    return "admin".equals(role) || "quotation".equals(role);
   }
 
   private int durationMinutes(String projects) {

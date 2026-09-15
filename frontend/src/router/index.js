@@ -36,8 +36,8 @@ const router = createRouter({
         { path: 'routes/map', component: RoutesMapView },
         { path: 'routes/book', component: BookView, meta: { permission: 'route:book' } },
         { path: 'inspector', component: InspectorWorkspaceView, meta: { permission: 'inspector:workspace' } },
-        { path: 'inspector/photos', component: InspectorPhotosView, meta: { managerOnly: true } },
-        { path: 'inspections/confirm', component: InspectionConfirmationView, meta: { managerOnly: true } }
+        { path: 'inspector/photos', component: InspectorPhotosView, meta: { allowedRoles: ['admin', 'manager', 'quotation'] } },
+        { path: 'inspections/confirm', component: InspectionConfirmationView, meta: { allowedRoles: ['admin', 'quotation'] } }
       ]
     }
   ]
@@ -50,14 +50,16 @@ router.beforeEach((to) => {
     return '/login'
   }
   if (to.path === '/login' && authState.token) {
-    if (authState.user?.roleCode === 'inspector') return '/inspector'
-    return ['scheduler', 'sales'].includes(authState.user?.roleCode) ? '/inspections/search' : '/dashboard'
+    return roleHome(authState.user?.roleCode)
   }
   if (to.meta.adminOnly && authState.user?.roleCode !== 'admin') {
-    return ['scheduler', 'sales'].includes(authState.user?.roleCode) ? '/inspections/search' : '/dashboard'
+    return roleHome(authState.user?.roleCode)
   }
   if (to.meta.managerOnly && !['admin', 'manager'].includes(authState.user?.roleCode)) {
-    return ['scheduler', 'sales'].includes(authState.user?.roleCode) ? '/inspections/search' : '/dashboard'
+    return roleHome(authState.user?.roleCode)
+  }
+  if (to.meta.allowedRoles && !to.meta.allowedRoles.includes(authState.user?.roleCode)) {
+    return roleHome(authState.user?.roleCode)
   }
   if (authState.user?.roleCode === 'scheduler' &&
       !['/inspections/search', '/routes/book', '/inspector'].includes(to.path)) {
@@ -70,11 +72,22 @@ router.beforeEach((to) => {
   if (authState.user?.roleCode === 'inspector' && to.path !== '/inspector') {
     return '/inspector'
   }
+  if (authState.user?.roleCode === 'quotation' &&
+      !['/inspector/photos', '/inspections/confirm'].includes(to.path)) {
+    return '/inspector/photos'
+  }
   const schedulerInspectorWorkspace = authState.user?.roleCode === 'scheduler' && to.path === '/inspector'
   if (to.meta.permission && !authState.permissions.includes(to.meta.permission) && !schedulerInspectorWorkspace) {
     return '/dashboard'
   }
   return true
 })
+
+function roleHome(roleCode) {
+  if (roleCode === 'inspector') return '/inspector'
+  if (roleCode === 'quotation') return '/inspector/photos'
+  if (['scheduler', 'sales'].includes(roleCode)) return '/inspections/search'
+  return '/dashboard'
+}
 
 export default router

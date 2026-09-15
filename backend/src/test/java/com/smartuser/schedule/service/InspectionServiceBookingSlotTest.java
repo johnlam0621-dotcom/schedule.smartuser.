@@ -76,6 +76,23 @@ class InspectionServiceBookingSlotTest {
   }
 
   @Test
+  void finalOverlapCheckNormalizesImportedInspectorWhitespaceAndCase() throws Exception {
+    InspectionMapper inspectionMapper = mock(InspectionMapper.class);
+    InspectionRecord existing = record(9L, "Fixed", "  ROHIEN  ", "2026-09-10", "10:00", "1 Existing St");
+    when(inspectionMapper.selectList(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(existing));
+    InspectionService service = new InspectionService(inspectionMapper, mock(ImportBatchMapper.class),
+        new ObjectMapper(), null, mock(PlatformTransactionManager.class));
+    Method method = InspectionService.class.getDeclaredMethod("ensureBookSlotAvailable",
+        LocalDate.class, String.class, String.class, int.class, Long.class);
+    method.setAccessible(true);
+
+    assertThatThrownBy(() -> method.invoke(service, LocalDate.parse("2026-09-10"), "Rohien", "10:00", 30, 88L))
+        .isInstanceOf(InvocationTargetException.class)
+        .hasCauseInstanceOf(BadRequestException.class)
+        .hasRootCauseMessage("Selected slot overlaps an existing appointment.");
+  }
+
+  @Test
   void acceptsManualAustralianAddressWhenSelectedStateCompletesIt() throws Exception {
     // 自动补全不可用时，用户只需输入门牌、街道和 suburb；State 下拉框补齐州信息。
     assertThat(invokeAddressValidation("353 Balwyn Road Balwyn North", "VIC")).isEqualTo("VIC");

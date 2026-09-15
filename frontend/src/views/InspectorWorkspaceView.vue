@@ -146,7 +146,7 @@
           </div>
 
           <div class="photo-heading">
-            <div><strong>Photo uploads</strong><span>Files are stored in this application only.</span></div>
+            <div><strong>Photo uploads</strong><span>Photos start immediately while one video continues in the background. Keep SmartUser open until every file finishes.</span></div>
             <span class="file-count">{{ photoCount(stop) }} files</span>
           </div>
           <div class="photo-product-selector" role="tablist" aria-label="Inspection product">
@@ -219,6 +219,8 @@
                 <div v-for="file in slot.files" :key="file.id" class="uploaded-file-item">
                   <div class="uploaded-file-row">
                     <span :title="file.name">{{ file.name }}</span>
+                    <button v-if="isVideoSlot(slot)" type="button" class="annotate-upload" @click="openVideo(file, slot.label)">Play</button>
+                    <a v-if="isVideoSlot(slot)" class="video-file-download" :href="downloadVideoUrl(file)" download>Download</a>
                     <button v-if="!isVideoSlot(slot) && isImageFile(file)" type="button" class="annotate-upload" @click="openAnnotationEditor(stop, slot, file)">
                       Draw
                     </button>
@@ -305,9 +307,9 @@
           <div class="photo-heading additional-photo-heading">
             <div>
               <strong>Inspection Videos</strong>
-              <span>Upload up to four videos. For the fastest upload, use Record video; selected files stream directly. Maximum size: 3 GB each.</span>
+              <span>Upload up to {{ videoLimit(stop) }} videos. For the fastest upload, use Record video; selected files stream directly. Maximum size: 3 GB each.</span>
             </div>
-            <span class="file-count">{{ videoCount(stop) }}/4 videos</span>
+            <span class="file-count">{{ videoCount(stop) }}/{{ videoLimit(stop) }} videos</span>
           </div>
           <div class="photo-grid video-upload-grid">
             <div v-for="slot in videoSlots(stop)" :key="slot.key" class="photo-slot video-slot">
@@ -327,6 +329,8 @@
               <div v-if="slot.files?.length" class="uploaded-file-list">
                 <div v-for="file in slot.files" :key="file.id" class="uploaded-file-row">
                   <span :title="file.name">{{ file.name }}</span>
+                  <button type="button" class="annotate-upload" @click="openVideo(file, slot.label)">Play</button>
+                  <a class="video-file-download" :href="downloadVideoUrl(file)" download>Download</a>
                   <button type="button" class="delete-upload" :disabled="isDeleting(file)" @click="deleteUploadedFile(stop, slot, file)">
                     {{ isDeleting(file) ? 'Deleting…' : 'Delete' }}
                   </button>
@@ -363,6 +367,22 @@
     <input ref="cameraInput" class="hidden-file" type="file" accept="image/*" capture="environment" @change="uploadPhoto" />
     <!-- 直接录制可让手机相机输出已经硬件压缩的视频，避免浏览器内转码造成更长等待。 -->
     <input ref="videoCameraInput" class="hidden-file" type="file" accept="video/*" capture="environment" @change="uploadPhoto" />
+
+    <Teleport to="body">
+      <div v-if="activeVideo.open" class="inspector-video-backdrop" @click.self="closeVideo">
+        <section class="inspector-video-dialog" role="dialog" aria-modal="true" aria-labelledby="inspector-video-title">
+          <button type="button" class="annotation-close" aria-label="Close video" @click="closeVideo">×</button>
+          <div v-if="activeVideo.preparing" class="inspector-video-preparing">{{ activeVideo.status }}</div>
+          <video v-else-if="activeVideo.url" :src="activeVideo.url" controls autoplay preload="metadata" @error="videoPlaybackFailed"></video>
+          <footer>
+            <strong id="inspector-video-title">{{ activeVideo.label }}</strong>
+            <span>{{ activeVideo.file?.name }}</span>
+            <a v-if="activeVideo.url" :href="`${activeVideo.url}?download=true`" download>Download smaller video</a>
+            <a v-if="activeVideo.file" :href="downloadVideoUrl(activeVideo.file)" download>Download original video</a>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
 
     <Teleport to="body">
       <div v-if="annotationEditor.open" class="annotation-backdrop" @click.self="closeAnnotationEditor">
@@ -430,6 +450,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'v
 import http from '../api/http'
 import { queueBackgroundUpload } from '../store/uploadQueue'
 import { authState } from '../store/auth'
+import { originalVideoDownloadUrl, prepareVideoPlayback } from '../utils/videoPlayback'
 
 const activeTab = ref('route')
 const selectedDate = ref(localDateText(new Date()))
@@ -453,6 +474,7 @@ const uploadProgress = reactive({})
 const deleteProgress = reactive({})
 const photoProductSelection = reactive({})
 const photoRemarkEditor = reactive({ photoId: null, value: '', saving: false })
+const activeVideo = reactive({ open: false, preparing: false, status: '', url: '', file: null, label: '' })
 const annotationCanvas = ref(null)
 const annotationActions = ref([])
 const annotationEditor = reactive({
@@ -495,15 +517,21 @@ const batterySalesUploadKeys = new Set([
   'battery_measurements',
   'signed_documents'
 ])
-const airConditioningPlanUploadKeys = new Set([
-  'additional_photo_9',
-  'additional_photo_10'
+const macPlanUploadKeys = new Set([
+  'mac_floor_plan',
+  'mac_measurements'
 ])
 const photoProducts = [
   {
-    key: 'air_conditioning',
-    label: 'Air Conditioning',
-    description: 'AC / ducted AC photos',
+    key: 'mac',
+    label: 'MAC',
+    description: 'MAC inspection photos',
+    group: 'standard'
+  },
+  {
+    key: 'dac',
+    label: 'DAC',
+    description: 'DAC photos, 12 additional photos and 9 videos',
     group: 'standard'
   },
   {
@@ -555,6 +583,7 @@ onMounted(() => {
   window.addEventListener('keydown', handleAnnotationKeydown)
 })
 onBeforeUnmount(() => {
+  closeVideo()
   Object.values(previews).forEach((url) => URL.revokeObjectURL(url))
   releaseAnnotationImage()
   window.removeEventListener('keydown', handleAnnotationKeydown)
@@ -731,6 +760,7 @@ async function uploadPhoto(event) {
     name: originalFile.name,
     size: originalFile.size,
     description: `${queuedStop.customerName || 'Inspection'} · ${queuedSlot.label}`,
+    mediaType: 'video',
     upload: (onProgress) => uploadPreparedFile(queuedStop, queuedSlot, file, originalFile, true, onProgress)
   })
   showMessage('Video added to the background upload queue. You can use other SmartUser pages while it uploads.', false)
@@ -743,16 +773,21 @@ async function uploadPreparedFile(stop, slot, file, originalFile = file, isVideo
   data.append('categoryKey', slot.key)
   data.append('file', file)
   try {
-    const uploaded = await http.post(`/inspector/route/${stop.id}/photos`, data, {
-      timeout: 0,
-      onUploadProgress: (progressEvent) => {
-        if (progressEvent.total) {
-          const progress = Math.max(1, Math.round(progressEvent.loaded * 100 / progressEvent.total))
-          uploadProgress[progressKey] = progress
-          onBackgroundProgress?.(progress)
+    const uploaded = file.size >= 10 * 1024 * 1024
+      ? await uploadFileInChunks(stop, slot, file, (progress) => {
+        uploadProgress[progressKey] = progress
+        onBackgroundProgress?.(progress)
+      }, isVideo)
+      : await http.post(`/inspector/route/${stop.id}/photos`, data, {
+        timeout: 0,
+        onUploadProgress: (progressEvent) => {
+          if (progressEvent.total) {
+            const progress = Math.max(1, Math.round(progressEvent.loaded * 100 / progressEvent.total))
+            uploadProgress[progressKey] = progress
+            onBackgroundProgress?.(progress)
+          }
         }
-      }
-    })
+      })
     const uploadedFile = { id: uploaded.id, url: uploaded.url, name: file.name || originalFile.name, remark: '' }
     slot.files = [...(slot.files || []), uploadedFile]
     if (!isVideo) await loadPreview(uploadedFile)
@@ -769,6 +804,65 @@ async function uploadPreparedFile(stop, slot, file, originalFile = file, isVideo
   } finally {
     delete uploadProgress[progressKey]
   }
+}
+
+async function uploadFileInChunks(stop, slot, file, onProgress, isVideo = false) {
+  // Videos use parallel chunks for speed. Photos still use their own upload
+  // lane, so starting a photo never waits for these video requests to finish.
+  const chunkSize = 16 * 1024 * 1024
+  const totalChunks = Math.ceil(file.size / chunkSize)
+  const uploadId = crypto.randomUUID?.() || `${Date.now().toString(16).padStart(8, '0')}-0000-4000-8000-${Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12)}`
+  const loadedByChunk = Array(totalChunks).fill(0)
+  let nextIndex = 0
+  const reportProgress = () => {
+    const loaded = loadedByChunk.reduce((sum, bytes) => sum + bytes, 0)
+    onProgress(Math.max(1, Math.min(99, Math.round(loaded * 100 / file.size))))
+  }
+  const worker = async () => {
+    while (nextIndex < totalChunks) {
+      const index = nextIndex++
+      const start = index * chunkSize
+      const chunk = file.slice(start, Math.min(file.size, start + chunkSize))
+      let lastError = null
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const data = new FormData()
+          data.append('categoryKey', slot.key)
+          data.append('uploadId', uploadId)
+          data.append('chunkIndex', String(index))
+          data.append('totalChunks', String(totalChunks))
+          data.append('file', chunk, `${file.name}.part${index}`)
+          await http.post(`/inspector/route/${stop.id}/photos/chunk`, data, {
+            timeout: 0,
+            onUploadProgress: (event) => {
+              loadedByChunk[index] = Math.min(chunk.size, event.loaded || 0)
+              reportProgress()
+            }
+          })
+          loadedByChunk[index] = chunk.size
+          reportProgress()
+          lastError = null
+          break
+        } catch (error) {
+          lastError = error
+          loadedByChunk[index] = 0
+          reportProgress()
+          if (attempt < 3) await new Promise((resolve) => window.setTimeout(resolve, attempt * 1000))
+        }
+      }
+      if (lastError) throw lastError
+    }
+  }
+  const concurrentChunks = Math.min(3, totalChunks)
+  await Promise.all(Array.from({ length: concurrentChunks }, worker))
+  return http.post(`/inspector/route/${stop.id}/photos/complete`, {
+    categoryKey: slot.key,
+    uploadId,
+    totalChunks,
+    totalSize: file.size,
+    originalName: file.name,
+    contentType: file.type
+  }, { timeout: 0 })
 }
 
 async function deleteUploadedFile(stop, slot, file) {
@@ -1080,13 +1174,20 @@ async function saveAnnotatedCopy() {
     const file = new File([blob], fileName, { type: 'image/jpeg', lastModified: Date.now() })
     if (preUpload) {
       const hadAnnotations = annotationActions.value.length > 0
-      await uploadPreparedFile(stop, slot, file, annotationEditor.pendingFile || file, false)
+      const originalFile = annotationEditor.pendingFile || file
+      queueBackgroundUpload({
+        name: originalFile.name || file.name,
+        size: originalFile.size || file.size,
+        description: `${stop.customerName || 'Inspection'} · ${slot.label}`,
+        mediaType: 'photo',
+        upload: (onProgress) => uploadPreparedFile(stop, slot, file, originalFile, false, onProgress)
+      })
       annotationEditor.saving = false
       closeAnnotationEditor()
       expandedId.value = stop.id
       showMessage(hadAnnotations
-        ? 'Marked photo uploaded successfully.'
-        : 'Photo reviewed and uploaded successfully.', false)
+        ? 'Marked photo added to the background upload queue.'
+        : 'Photo added to the background upload queue.', false)
       return
     }
     const data = new FormData()
@@ -1175,11 +1276,13 @@ function photoCount(stop) { return (stop.photoSlots || []).reduce((sum, slot) =>
 function standardPhotoSlots(stop) { return (stop.photoSlots || []).filter((slot) => slot.group === 'standard') }
 function defaultPhotoProduct(stop) {
   const projects = String(stop?.projects || '').toLowerCase()
+  if (/(^|[^a-z])dac([^a-z]|$)/.test(projects)) return 'dac'
+  if (/(^|[^a-z])mac([^a-z]|$)/.test(projects)) return 'mac'
   if ((projects.includes('battery') || /(^|[^a-z])sp([^a-z]|$)/.test(projects)) && !projects.includes('mac') && !projects.includes('dac')) {
     return 'battery_solar'
   }
   if (projects.includes('hp') && !projects.includes('mac') && !projects.includes('dac')) return 'heat_pump'
-  return 'air_conditioning'
+  return 'mac'
 }
 function selectedPhotoProduct(stop) {
   return photoProductSelection[stop.id] || defaultPhotoProduct(stop)
@@ -1214,25 +1317,26 @@ function productPhotoSections(stop) {
       slots: slots.filter((slot) => slot.group === 'heat_pump')
     }]
   }
+  const productLabel = productKey === 'dac' ? 'DAC' : 'MAC'
   return [
     {
-      key: 'air_conditioning',
-      title: 'Air Conditioning Uploads',
-      description: 'Required AC and ducted-system inspection evidence.',
+      key: productKey,
+      title: `${productLabel} Uploads`,
+      description: `Required ${productLabel} and ducted-system inspection evidence.`,
       slots: slots.filter((slot) => slot.group === 'standard' && slot.key !== 'drawn_floor_plan_measurements')
     },
     {
-      key: 'air_conditioning_plans',
+      key: `${productKey}_plans`,
       title: 'Floor Plan & Measurements',
-      description: 'Upload the drawn floor plan and the separate measurement document for the MAC inspection.',
-      slots: slots.filter((slot) => airConditioningPlanUploadKeys.has(slot.key))
+      description: `Upload the drawn floor plan and the separate measurement document for the ${productLabel} inspection.`,
+      slots: slots.filter((slot) => macPlanUploadKeys.has(slot.key))
     }
   ]
 }
 function ensureMacPlanUploadSlots(stops) {
   const definitions = [
-    { key: 'additional_photo_9', label: 'Floor Plan', group: 'additional', files: [] },
-    { key: 'additional_photo_10', label: 'Measurements', group: 'additional', files: [] }
+    { key: 'mac_floor_plan', label: 'Floor Plan', group: 'mac_plan', files: [] },
+    { key: 'mac_measurements', label: 'Measurements', group: 'mac_plan', files: [] }
   ]
   stops.forEach((stop) => {
     if (!projectFlags(stop).airConditioning) return
@@ -1251,19 +1355,59 @@ function sectionFileCount(section) {
   return (section.slots || []).reduce((sum, slot) => sum + (slot.files?.length || 0), 0)
 }
 function additionalPhotoSlots(stop) {
-  return (stop.photoSlots || []).filter((slot) => slot.group === 'additional' && !airConditioningPlanUploadKeys.has(slot.key))
+  const limit = selectedPhotoProduct(stop) === 'dac' ? 12 : 10
+  return (stop.photoSlots || []).filter((slot) => {
+    const match = /^additional_photo_(\d+)$/.exec(slot.key)
+    return slot.group === 'additional' && match && Number(match[1]) <= limit
+  })
 }
-function videoSlots(stop) { return (stop.photoSlots || []).filter((slot) => slot.group === 'video') }
+function videoLimit(stop) { return selectedPhotoProduct(stop) === 'dac' ? 9 : 4 }
+function videoSlots(stop) {
+  const limit = videoLimit(stop)
+  return (stop.photoSlots || []).filter((slot) => {
+    const match = /^inspection_video_(\d+)$/.exec(slot.key)
+    return slot.group === 'video' && match && Number(match[1]) <= limit
+  })
+}
 function isVideoSlot(slot) { return String(slot?.group || '').includes('video') }
+function downloadVideoUrl(file) { return originalVideoDownloadUrl(file) }
+async function openVideo(file, label) {
+  activeVideo.open = true
+  activeVideo.preparing = true
+  activeVideo.status = 'Preparing video…'
+  activeVideo.url = ''
+  activeVideo.file = file
+  activeVideo.label = label
+  try {
+    activeVideo.url = await prepareVideoPlayback(file, (status) => { activeVideo.status = status })
+  } catch (requestError) {
+    showMessage(requestError.message || 'The video could not be prepared.', true)
+  } finally {
+    activeVideo.preparing = false
+  }
+}
+function closeVideo() {
+  activeVideo.open = false
+  activeVideo.preparing = false
+  activeVideo.url = ''
+  activeVideo.file = null
+}
+function videoPlaybackFailed() {
+  showMessage('This video could not be played. Use Download original video instead.', true)
+}
 function projectFlags(stop) {
   const projects = String(stop?.projects || '').toLowerCase()
   const tokens = new Set(projects.split(/[^a-z0-9]+/).filter(Boolean))
   const batterySolar = tokens.has('battery') || tokens.has('sp') || projects.includes('solar')
   const heatPump = tokens.has('hp') || projects.includes('heat pump')
+  const mac = tokens.has('mac') || (!tokens.has('dac') && !batterySolar && !heatPump)
+  const dac = tokens.has('dac')
   return {
     batterySolar,
     heatPump,
-    airConditioning: tokens.has('mac') || tokens.has('dac') || (!batterySolar && !heatPump)
+    mac,
+    dac,
+    airConditioning: mac || dac
   }
 }
 function completionRequirements(stop) {
@@ -1271,9 +1415,10 @@ function completionRequirements(stop) {
   const flags = projectFlags(stop)
   const requirements = []
   if (flags.airConditioning) {
+    const product = flags.dac && !flags.mac ? 'dac' : 'mac'
     slots.filter((slot) => requiredPhotoKeys.has(slot.key)).forEach((slot) => requirements.push({
       key: slot.key,
-      product: 'air_conditioning',
+      product,
       label: slot.label,
       slotKeys: [slot.key],
       satisfied: Boolean(slot.files?.length)
@@ -1281,20 +1426,20 @@ function completionRequirements(stop) {
   }
   if (flags.batterySolar) {
     const batteryLocationKeys = ['battery_serial_label', 'battery_location']
+    const switchboardKeys = ['switchboard', 'battery_unit']
+    requirements.push({
+      key: 'battery_switchboard_requirement',
+      product: 'battery_solar',
+      label: 'Switchboard photo',
+      slotKeys: switchboardKeys,
+      satisfied: slots.some((slot) => switchboardKeys.includes(slot.key) && slot.files?.length)
+    })
     requirements.push({
       key: 'battery_location_requirement',
       product: 'battery_solar',
       label: 'Battery location photo (indoor or outdoor)',
       slotKeys: batteryLocationKeys,
       satisfied: slots.some((slot) => batteryLocationKeys.includes(slot.key) && slot.files?.length)
-    })
-    ;[
-      ['drawn_floor_plan_measurements', 'Floor Plan'],
-      ['battery_measurements', 'Measurements'],
-      ['battery_indoor_outdoor_video', 'Indoor / Outdoor Area Video']
-    ].forEach(([key, label]) => {
-      const slot = slots.find((item) => item.key === key)
-      requirements.push({ key, product: 'battery_solar', label, slotKeys: [key], satisfied: Boolean(slot?.files?.length) })
     })
   }
   return requirements
@@ -1312,16 +1457,18 @@ function requiredSlotSatisfied(stop, slot) {
 }
 function requiredSlotBadge(stop, slot) {
   const requirement = completionRequirements(stop).find((item) => item.slotKeys.includes(slot.key))
-  return requirement?.slotKeys.length > 1 ? 'Indoor or outdoor required' : 'Required'
+  if (requirement?.key === 'battery_location_requirement') return 'Indoor or outdoor required'
+  if (requirement?.key === 'battery_switchboard_requirement') return 'Either switchboard photo required'
+  return 'Required'
 }
 function selectedProductHasRequirements(stop) {
   return completionRequirements(stop).some((item) => item.product === selectedPhotoProduct(stop))
 }
 function requiredPhotoInstruction(stop) {
   if (selectedPhotoProduct(stop) === 'battery_solar') {
-    return 'Required: one indoor or outdoor battery-location photo, the floor plan, measurements, and one indoor/outdoor video.'
+    return 'Required: the battery switchboard photo and one indoor or outdoor battery-location photo.'
   }
-  return 'All required Air Conditioning photos must be uploaded before Job Done.'
+  return `All required ${selectedPhotoProduct(stop) === 'dac' ? 'DAC' : 'MAC'} photos must be uploaded before Job Done.`
 }
 function additionalPhotoCount(stop) {
   return additionalPhotoSlots(stop).reduce((sum, slot) => sum + (slot.files?.length || 0), 0)
