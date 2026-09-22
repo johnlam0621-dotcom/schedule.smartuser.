@@ -249,7 +249,7 @@ class InspectionServiceBookingSlotTest {
   }
 
   private InspectionService service() {
-    return new InspectionService(null, null, new ObjectMapper(), null,
+    return new InspectionService(mock(InspectionMapper.class), null, new ObjectMapper(), null,
         mock(PlatformTransactionManager.class));
   }
 

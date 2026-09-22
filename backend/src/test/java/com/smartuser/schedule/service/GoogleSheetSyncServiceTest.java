@@ -23,6 +23,61 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class GoogleSheetSyncServiceTest {
   private HttpServer server;
 
+  @Test
+  void readOnlyStatusWorksWithLegacyWriteSwitchDisabled() throws Exception {
+    server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+    server.createContext("/exec", exchange -> send(exchange, 200,
+        "{\"ok\":true,\"sheetName\":\"Week 396\"}"));
+    server.start();
+    GoogleSheetProperties properties = new GoogleSheetProperties();
+    properties.setEnabled(false);
+    properties.setSpreadsheetId("test-sheet");
+    properties.setWebAppUrl(baseUrl() + "/exec");
+    properties.setWebAppSecret("test-secret");
+    assertThat(new GoogleSheetSyncService(properties, new ObjectMapper()).checkStatus().getStatus())
+        .isEqualTo("success");
+  }
+
+  @Test
+  void allReadEntryPointsReportMissingSpreadsheetConsistently() {
+    GoogleSheetSyncService service = new GoogleSheetSyncService(new GoogleSheetProperties(), new ObjectMapper());
+    assertThat(service.checkStatus().getMessage()).contains("spreadsheet id");
+    assertThatThrownBy(service::listImportSheets).hasMessageContaining("spreadsheet id");
+    assertThatThrownBy(() -> service.previewImportSheet(1L)).hasMessageContaining("spreadsheet id");
+    assertThatThrownBy(() -> service.readImportSheet(1L)).hasMessageContaining("spreadsheet id");
+  }
+
+  @Test
+  void rejectsInvalidGidBeforeConnecting() {
+    GoogleSheetProperties properties = new GoogleSheetProperties();
+    properties.setSpreadsheetId("test-sheet");
+    properties.setServiceAccountJson("{}");
+    GoogleSheetSyncService service = new GoogleSheetSyncService(properties, new ObjectMapper());
+    assertThatThrownBy(() -> service.previewImportSheet(null)).hasMessageContaining("valid Google Sheet tab");
+    assertThatThrownBy(() -> service.readImportSheet(-1L)).hasMessageContaining("valid Google Sheet tab");
+  }
+
+  @Test
+  void metadataPreservesExactTabTitle() throws Exception {
+    GoogleSheetProperties properties = new GoogleSheetProperties();
+    properties.setSpreadsheetId("test-sheet");
+    GoogleSheetSyncService service = new GoogleSheetSyncService(properties, new ObjectMapper());
+    java.lang.reflect.Field field = GoogleSheetSyncService.class.getDeclaredField("restTemplate");
+    field.setAccessible(true);
+    org.springframework.test.web.client.MockRestServiceServer mockServer =
+        org.springframework.test.web.client.MockRestServiceServer.bindTo(
+            (org.springframework.web.client.RestTemplate) field.get(service)).build();
+    mockServer.expect(org.springframework.test.web.client.match.MockRestRequestMatchers.anything())
+        .andRespond(org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess(
+            "{\"sheets\":[{\"properties\":{\"sheetId\":0,\"title\":\" Week 396 \"}}]}",
+            org.springframework.http.MediaType.APPLICATION_JSON));
+    Method method = GoogleSheetSyncService.class.getDeclaredMethod("readSheetMetadata", String.class);
+    method.setAccessible(true);
+    List<?> result = (List<?>) method.invoke(service, "test-token");
+    assertThat(((java.util.Map<?, ?>) result.get(0)).get("name")).isEqualTo(" Week 396 ");
+    mockServer.verify();
+  }
+
   @AfterEach
   void stopServer() {
     if (server != null) {

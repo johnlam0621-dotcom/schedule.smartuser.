@@ -243,6 +243,7 @@ public class InspectionService {
           .map(InspectionRecord::getId)
           .filter(Objects::nonNull)
           .toList();
+      requireNoAttachedMedia(staleImportedIds);
       int removedRows = staleImportedIds.isEmpty() ? 0 : inspectionMapper.deleteBatchIds(staleImportedIds);
       Long batchId = createImportBatch(result.getFileName(), "google-sheet", result.getTotalRows(), records.size(),
           result.getErrors().size(), currentUser);
@@ -387,6 +388,7 @@ public class InspectionService {
         }
       }
       List<Long> staleOpenSlotIds = staleOpenSheetSlotIds(existingRecords, incomingRecords, sheetGid);
+      requireNoAttachedMedia(staleOpenSlotIds);
       int removedStaleOpenSpaces = staleOpenSlotIds.isEmpty()
           ? 0 : inspectionMapper.deleteBatchIds(staleOpenSlotIds);
       Map<String, Object> result = new LinkedHashMap<String, Object>();
@@ -451,6 +453,10 @@ public class InspectionService {
       return false;
     }
     // 仅开放空位允许被 Sheet 更新；保留主键和批次，使照片等外键关系稳定。
+    // Even an incorrectly labelled Open Slot may already hold inspection evidence.
+    if (existing.getId() != null && inspectionMapper.countAttachedMedia(List.of(existing.getId())) > 0) {
+      return false;
+    }
     existing.setRowNumber(incoming.getRowNumber());
     existing.setDayName(incoming.getDayName());
     existing.setStatus(incoming.getStatus());
@@ -579,6 +585,7 @@ public class InspectionService {
         .filter(Objects::nonNull)
         .toList();
     if (!consumedSlotIds.isEmpty()) {
+      requireNoAttachedMedia(consumedSlotIds);
       inspectionMapper.deleteBatchIds(consumedSlotIds);
     }
   }
@@ -746,6 +753,7 @@ public class InspectionService {
       throw new BadRequestException("Record id is required.");
     }
     LOG.info("Deleting inspection record id={}", id);
+    requireNoAttachedMedia(List.of(id));
     return inspectionMapper.deleteById(id);
   }
 
@@ -764,6 +772,7 @@ public class InspectionService {
       throw new BadRequestException("Record ids are required.");
     }
     LOG.info("Deleting inspection records in bulk count={} ids={}", validIds.size(), validIds);
+    requireNoAttachedMedia(validIds);
     return inspectionMapper.deleteBatchIds(validIds);
   }
 
@@ -771,7 +780,7 @@ public class InspectionService {
     // 删除全部使用当前查询条件构造同一套筛选器，保证“看到什么条件就删什么范围”。
     LOG.info("Deleting by imported-record filters startDate={} endDate={} inspector={} sales={} keyword={}",
         startDate, endDate, inspector, sales, keyword);
-    return inspectionMapper.delete(buildRecordFilter(startDate, endDate, inspector, sales, keyword));
+    return deleteMatchingRecords(inspectionMapper.selectList(buildRecordFilter(startDate, endDate, inspector, sales, keyword)));
   }
 
   public int deleteRecordsByRouteFilter(String startDate, String endDate, String routeName, String inspector,
@@ -779,7 +788,20 @@ public class InspectionService {
     // Routes map 的删除全部按当前页面完整查询条件过滤，避免误删查询范围外的数据。
     LOG.info("Deleting by route filters startDate={} endDate={} route={} inspector={} sales={} keyword={}",
         startDate, endDate, routeName, inspector, sales, keyword);
-    return inspectionMapper.delete(buildRouteFilter(startDate, endDate, routeName, inspector, sales, keyword));
+    return deleteMatchingRecords(inspectionMapper.selectList(buildRouteFilter(startDate, endDate, routeName, inspector, sales, keyword)));
+  }
+
+  private int deleteMatchingRecords(List<InspectionRecord> records) {
+    List<Long> ids = records.stream().map(InspectionRecord::getId).filter(Objects::nonNull).toList();
+    return ids.isEmpty() ? 0 : deleteRecords(ids);
+  }
+
+  void requireNoAttachedMedia(List<Long> ids) {
+    if (!ids.isEmpty() && inspectionMapper.countAttachedMedia(ids) > 0) {
+      throw new BadRequestException("Cannot replace or delete inspections with uploaded photos or videos. " +
+          "Their records must be retained so Inspection Done and Inspector Photos can show the evidence. " +
+          "Use the non-destructive Google Sheet refresh instead of Replace existing week.");
+    }
   }
 
   public Map<String, Object> routeOptions(String startDate, String endDate, String inspector, String sales,

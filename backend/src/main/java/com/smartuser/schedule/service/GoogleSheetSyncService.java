@@ -82,6 +82,7 @@ public class GoogleSheetSyncService {
   }
 
   public List<Map<String, Object>> listImportSheets() {
+    requireReadConfiguration();
     // Prefer the service account whenever it is configured. Status checks already use
     // this order; keeping list/read on the same connection prevents a healthy status
     // check followed by a failed Apps Script import when both settings are present.
@@ -103,6 +104,8 @@ public class GoogleSheetSyncService {
   }
 
   public Map<String, Object> previewImportSheet(Long sheetGid) {
+    requireReadConfiguration();
+    requireSheetGid(sheetGid);
     if (hasServiceAccountCredentials()) {
       return readImportSheetWithServiceAccount(sheetGid, false);
     }
@@ -110,6 +113,8 @@ public class GoogleSheetSyncService {
   }
 
   public Map<String, Object> readImportSheet(Long sheetGid) {
+    requireReadConfiguration();
+    requireSheetGid(sheetGid);
     if (hasServiceAccountCredentials()) {
       return readImportSheetWithServiceAccount(sheetGid, true);
     }
@@ -126,7 +131,7 @@ public class GoogleSheetSyncService {
       List<Map<String, Object>> result = new ArrayList<Map<String, Object>>();
       for (Map<String, Object> sheet : sheets) {
         String name = string(sheet.get("name"));
-        if (Boolean.TRUE.equals(sheet.get("hidden")) || !name.matches("(?i)^Week\\s+\\d+.*")) {
+        if (Boolean.TRUE.equals(sheet.get("hidden")) || !name.trim().matches("(?i)^Week\\s+\\d+.*")) {
           continue;
         }
         result.add(sheet);
@@ -216,7 +221,8 @@ public class GoogleSheetSyncService {
       Map<?, ?> grid = gridValue instanceof Map ? (Map<?, ?>) gridValue : new LinkedHashMap<Object, Object>();
       Map<String, Object> item = new LinkedHashMap<String, Object>();
       item.put("gid", sheetProperties.get("sheetId"));
-      item.put("name", string(sheetProperties.get("title")).trim());
+      // Preserve the exact title for A1 range addressing, including edge spaces.
+      item.put("name", string(sheetProperties.get("title")));
       item.put("hidden", Boolean.TRUE.equals(sheetProperties.get("hidden")));
       item.put("rowCount", number(grid.get("rowCount")));
       item.put("columnCount", number(grid.get("columnCount")));
@@ -391,9 +397,7 @@ public class GoogleSheetSyncService {
 
   private GoogleSheetSyncResult validateConfiguration() {
     // 同步前必须具备 spreadsheetId，并至少配置一种凭据方式。
-    if (!properties.isEnabled()) {
-      return GoogleSheetSyncResult.skipped("Google Sheet sync is disabled.");
-    }
+    // enabled controls legacy write-back, not read-only imports or connectivity.
     if (!StringUtils.hasText(properties.getSpreadsheetId())) {
       return GoogleSheetSyncResult.failed("Google spreadsheet id is not configured.");
     }
@@ -401,6 +405,19 @@ public class GoogleSheetSyncService {
       return GoogleSheetSyncResult.failed("Google synchronization credentials are not configured. Set the service-account JSON or configure GOOGLE_SHEET_WEB_APP_URL and GOOGLE_SHEET_WEB_APP_SECRET. The Google Sheets API cannot sign in with an email address and password.");
     }
     return GoogleSheetSyncResult.success(0, "Google Sheet sync is configured.");
+  }
+
+  private void requireReadConfiguration() {
+    GoogleSheetSyncResult readiness = validateConfiguration();
+    if (!"success".equals(readiness.getStatus())) {
+      throw new BadRequestException(readiness.getMessage());
+    }
+  }
+
+  private void requireSheetGid(Long sheetGid) {
+    if (sheetGid == null || sheetGid < 0) {
+      throw new BadRequestException("A valid Google Sheet tab must be selected.");
+    }
   }
 
   private boolean hasServiceAccountCredentials() {
