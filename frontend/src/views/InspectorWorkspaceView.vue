@@ -151,7 +151,7 @@
           </div>
           <div class="photo-product-selector" role="tablist" aria-label="Inspection product">
             <button
-              v-for="product in photoProducts"
+              v-for="product in assignedPhotoProducts(stop)"
               :key="product.key"
               type="button"
               role="tab"
@@ -451,6 +451,7 @@ import http from '../api/http'
 import { queueBackgroundUpload } from '../store/uploadQueue'
 import { authState } from '../store/auth'
 import { originalVideoDownloadUrl, prepareVideoPlayback } from '../utils/videoPlayback'
+import { assignedProductKeys, resolveAssignedProduct } from '../utils/assignedProducts'
 
 const activeTab = ref('route')
 const selectedDate = ref(localDateText(new Date()))
@@ -716,6 +717,7 @@ function toggleDetails(stop) {
 }
 
 function choosePhoto(stop, slot) {
+  if (!checkAssignedUploadSlot(stop, slot)) return
   uploadTarget.value = { stop, slot }
   uploadAccept.value = isVideoSlot(slot) ? 'video/mp4,video/quicktime,video/webm,video/x-m4v,video/3gpp' : 'image/*'
   photoInput.value.value = ''
@@ -723,12 +725,14 @@ function choosePhoto(stop, slot) {
 }
 
 function takePhoto(stop, slot) {
+  if (!checkAssignedUploadSlot(stop, slot)) return
   uploadTarget.value = { stop, slot }
   cameraInput.value.value = ''
   cameraInput.value.click()
 }
 
 function recordVideo(stop, slot) {
+  if (!checkAssignedUploadSlot(stop, slot)) return
   uploadTarget.value = { stop, slot }
   videoCameraInput.value.value = ''
   videoCameraInput.value.click()
@@ -1274,25 +1278,37 @@ function formatBytes(bytes) {
 function previewUrl(slot) { return slot.files?.length ? previews[slot.files[0].id] : '' }
 function photoCount(stop) { return (stop.photoSlots || []).reduce((sum, slot) => sum + (slot.files?.length || 0), 0) }
 function standardPhotoSlots(stop) { return (stop.photoSlots || []).filter((slot) => slot.group === 'standard') }
-function defaultPhotoProduct(stop) {
-  const projects = String(stop?.projects || '').toLowerCase()
-  if (/(^|[^a-z])dac([^a-z]|$)/.test(projects)) return 'dac'
-  if (/(^|[^a-z])mac([^a-z]|$)/.test(projects)) return 'mac'
-  if ((projects.includes('battery') || /(^|[^a-z])sp([^a-z]|$)/.test(projects)) && !projects.includes('mac') && !projects.includes('dac')) {
-    return 'battery_solar'
-  }
-  if (projects.includes('hp') && !projects.includes('mac') && !projects.includes('dac')) return 'heat_pump'
-  return 'mac'
+function assignedPhotoProducts(stop) {
+  const allowed = assignedProductKeys(stop?.projects)
+  return photoProducts.filter((product) => allowed.includes(product.key))
 }
 function selectedPhotoProduct(stop) {
-  return photoProductSelection[stop.id] || defaultPhotoProduct(stop)
+  return resolveAssignedProduct(stop?.projects, photoProductSelection[stop.id])
 }
 function setPhotoProduct(stop, productKey) {
-  photoProductSelection[stop.id] = productKey
+  if (assignedProductKeys(stop?.projects).includes(productKey)) {
+    photoProductSelection[stop.id] = productKey
+  }
+}
+function checkAssignedUploadSlot(stop, slot) {
+  const slots = selectedPhotoProduct(stop)
+    ? [...productPhotoSections(stop).flatMap((section) => section.slots), ...additionalPhotoSlots(stop), ...videoSlots(stop)]
+    : []
+  if (slot && slots.some((item) => item.key === slot.key)) return true
+  showMessage('This upload is not assigned to this job.', true)
+  return false
 }
 function productPhotoSections(stop) {
   const slots = stop.photoSlots || []
   const productKey = selectedPhotoProduct(stop)
+  if (!productKey) {
+    return [{
+      key: 'unassigned',
+      title: 'No assigned product',
+      description: 'Ask your scheduler to assign a product before uploading photos or videos.',
+      slots: []
+    }]
+  }
   if (productKey === 'battery_solar') {
     return [
       {
@@ -1355,6 +1371,7 @@ function sectionFileCount(section) {
   return (section.slots || []).reduce((sum, slot) => sum + (slot.files?.length || 0), 0)
 }
 function additionalPhotoSlots(stop) {
+  if (!selectedPhotoProduct(stop)) return []
   const limit = selectedPhotoProduct(stop) === 'dac' ? 12 : 10
   return (stop.photoSlots || []).filter((slot) => {
     const match = /^additional_photo_(\d+)$/.exec(slot.key)
@@ -1363,6 +1380,7 @@ function additionalPhotoSlots(stop) {
 }
 function videoLimit(stop) { return selectedPhotoProduct(stop) === 'dac' ? 9 : 4 }
 function videoSlots(stop) {
+  if (!selectedPhotoProduct(stop)) return []
   const limit = videoLimit(stop)
   return (stop.photoSlots || []).filter((slot) => {
     const match = /^inspection_video_(\d+)$/.exec(slot.key)
